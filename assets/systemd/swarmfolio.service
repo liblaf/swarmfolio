@@ -1,0 +1,22 @@
+[Unit]
+Description=Optimize the M-Team freeleech torrent portfolio
+Documentation=https://github.com/liblaf/swarmfolio
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%E/swarmfolio/environment
+ExecStart=%h/.local/bin/swarmfolio run --apply
+TimeoutStartSec=30m
+
+# The optimizer only needs its configuration and HTTP access to M-Team and qBittorrent.
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

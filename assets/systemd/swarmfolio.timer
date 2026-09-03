@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Swarmfolio hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+Unit=swarmfolio.service
+
+[Install]
+WantedBy=timers.target
