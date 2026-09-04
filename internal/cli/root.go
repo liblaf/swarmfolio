@@ -92,8 +92,7 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 	httpClient := &http.Client{Timeout: settings.HTTPTimeout}
 	qbt, err := qbittorrent.New(qbittorrent.Config{
 		BaseURL: settings.QBittorrent.BaseURL, Username: settings.QBittorrent.Username,
-		Password: settings.QBittorrent.Password, APIKey: settings.QBittorrent.APIKey,
-		HTTPClient: httpClient,
+		Password: settings.QBittorrent.Password, HTTPClient: httpClient,
 	})
 	if err != nil {
 		return err
@@ -241,6 +240,10 @@ func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
 			return fmt.Errorf("%s already exists (use --force to replace it)", path)
 		}
 		return fmt.Errorf("create %q: %w", path, err)
+	}
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("set permissions on %q: %w", path, err)
 	}
 	_, writeErr := file.Write(data)
 	closeErr := file.Close()

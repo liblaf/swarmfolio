@@ -32,20 +32,15 @@ type Torrent struct {
 	State        string
 	AddedAt      time.Time
 	LastActivity time.Time
-	Tags         string
 	Category     string
 	AutoTMM      bool
-	CandidateID  string
 }
 
 // Config controls selection and the destructive boundary of a plan.
 type Config struct {
 	BudgetBytes           int64
 	ReserveBytes          int64
-	ManagedTag            string
-	PendingTag            string
 	Category              string
-	ProtectedTags         []string
 	CandidateMaxAge       time.Duration
 	MinFreeleechRemaining time.Duration
 	MinLeechers           int
@@ -77,8 +72,9 @@ type Plan struct {
 	LimitBytes int64
 }
 
-// Build selects candidates in a stable order and returns only removals that are
-// explicitly owned by the configured managed tag. It never mutates its inputs.
+// Build selects candidates in a stable order and returns only removals owned by
+// the configured category and Automatic Torrent Management. It never mutates
+// its inputs.
 func Build(now time.Time, candidates []Candidate, torrents []Torrent, cfg Config) (Plan, error) {
 	if err := validateConfig(cfg); err != nil {
 		return Plan{}, err
@@ -87,7 +83,7 @@ func Build(now time.Time, candidates []Candidate, torrents []Torrent, cfg Config
 		return Plan{}, errors.New("optimizer: now must be set")
 	}
 
-	used, present, err := validateTorrents(torrents)
+	used, err := validateTorrents(torrents)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -111,7 +107,7 @@ func Build(now time.Time, candidates []Candidate, torrents []Torrent, cfg Config
 
 	filtered := make([]Candidate, 0, len(candidates))
 	for _, c := range candidates {
-		if !present[c.ID] && candidateEligible(now, c, cfg) {
+		if candidateEligible(now, c, cfg) {
 			filtered = append(filtered, c)
 		}
 	}
@@ -166,8 +162,8 @@ func validateConfig(c Config) error {
 	if c.BudgetBytes <= 0 || c.ReserveBytes < 0 || c.ReserveBytes >= c.BudgetBytes {
 		return errors.New("optimizer: budget must exceed a non-negative reserve")
 	}
-	if strings.TrimSpace(c.ManagedTag) == "" || strings.TrimSpace(c.PendingTag) == "" || strings.TrimSpace(c.Category) == "" {
-		return errors.New("optimizer: managed and pending tags and category must be set")
+	if strings.TrimSpace(c.Category) == "" {
+		return errors.New("optimizer: category must be set")
 	}
 	if c.CandidateMaxAge < 0 || c.MinFreeleechRemaining < 0 || c.MinResidency < 0 || c.MinIdle < 0 {
 		return errors.New("optimizer: durations must not be negative")
@@ -181,27 +177,23 @@ func validateConfig(c Config) error {
 	return nil
 }
 
-func validateTorrents(torrents []Torrent) (int64, map[string]bool, error) {
+func validateTorrents(torrents []Torrent) (int64, error) {
 	used := int64(0)
 	hashes := make(map[string]bool, len(torrents))
-	present := make(map[string]bool, len(torrents))
 	for _, t := range torrents {
 		if t.Hash == "" || t.Size < 0 || t.Uploaded < 0 || t.UploadRate < 0 || t.Progress < 0 || t.Progress > 1 || t.AddedAt.IsZero() || t.LastActivity.IsZero() {
-			return 0, nil, fmt.Errorf("optimizer: invalid torrent %q", t.Hash)
+			return 0, fmt.Errorf("optimizer: invalid torrent %q", t.Hash)
 		}
 		if hashes[t.Hash] {
-			return 0, nil, fmt.Errorf("optimizer: duplicate torrent hash %q", t.Hash)
+			return 0, fmt.Errorf("optimizer: duplicate torrent hash %q", t.Hash)
 		}
 		hashes[t.Hash] = true
-		if t.CandidateID != "" {
-			present[t.CandidateID] = true
-		}
 		if t.Size > math.MaxInt64-used {
-			return 0, nil, errors.New("optimizer: total torrent size overflows int64")
+			return 0, errors.New("optimizer: total torrent size overflows int64")
 		}
 		used += t.Size
 	}
-	return used, present, nil
+	return used, nil
 }
 
 func validateCandidates(candidates []Candidate) error {
@@ -226,14 +218,9 @@ func candidateEligible(now time.Time, c Candidate, cfg Config) bool {
 }
 
 func removable(now time.Time, torrents []Torrent, cfg Config) []Torrent {
-	protected := make(map[string]bool, len(cfg.ProtectedTags))
-	for _, tag := range cfg.ProtectedTags {
-		protected[tag] = true
-	}
 	var out []Torrent
 	for _, t := range torrents {
-		tags := tagSet(t.Tags)
-		if t.Category != cfg.Category || !t.AutoTMM || !tags[cfg.ManagedTag] || tags[cfg.PendingTag] || t.Progress != 1 || isProtected(tags, protected) {
+		if t.Category != cfg.Category || !t.AutoTMM || t.Progress != 1 {
 			continue
 		}
 		if now.Sub(t.AddedAt) < cfg.MinResidency || now.Sub(t.LastActivity) < cfg.MinIdle || t.UploadRate > cfg.ActiveUploadRate || busyState(t.State) {
@@ -242,25 +229,6 @@ func removable(now time.Time, torrents []Torrent, cfg Config) []Torrent {
 		out = append(out, t)
 	}
 	return out
-}
-
-func tagSet(tags string) map[string]bool {
-	set := map[string]bool{}
-	for _, tag := range strings.Split(tags, ",") {
-		if tag = strings.TrimSpace(tag); tag != "" {
-			set[tag] = true
-		}
-	}
-	return set
-}
-
-func isProtected(tags, protected map[string]bool) bool {
-	for tag := range tags {
-		if protected[tag] {
-			return true
-		}
-	}
-	return false
 }
 
 func busyState(state string) bool {

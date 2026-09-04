@@ -9,7 +9,7 @@ import (
 var testNow = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
 func testConfig() Config {
-	return Config{BudgetBytes: 100, ReserveBytes: 10, ManagedTag: "swarmfolio", PendingTag: "swarmfolio-pending", Category: "swarmfolio", CandidateMaxAge: 24 * time.Hour, MinFreeleechRemaining: time.Hour, MinLeechers: 1, MinOpportunityRatio: .5, MinResidency: time.Hour, MinIdle: time.Hour, ActiveUploadRate: 1, MaxAdditions: 2, MaxRemovals: 2}
+	return Config{BudgetBytes: 100, ReserveBytes: 10, Category: "swarmfolio", CandidateMaxAge: 24 * time.Hour, MinFreeleechRemaining: time.Hour, MinLeechers: 1, MinOpportunityRatio: .5, MinResidency: time.Hour, MinIdle: time.Hour, ActiveUploadRate: 1, MaxAdditions: 2, MaxRemovals: 2}
 }
 
 func candidate(id string, size int64, seeds, leeches int) Candidate {
@@ -17,7 +17,7 @@ func candidate(id string, size int64, seeds, leeches int) Candidate {
 }
 
 func torrent(hash string, size, uploaded int64) Torrent {
-	return Torrent{Hash: hash, Name: hash, Size: size, Uploaded: uploaded, Progress: 1, State: "pausedUP", AddedAt: testNow.Add(-2 * time.Hour), LastActivity: testNow.Add(-2 * time.Hour), Tags: "swarmfolio", Category: "swarmfolio", AutoTMM: true}
+	return Torrent{Hash: hash, Name: hash, Size: size, Uploaded: uploaded, Progress: 1, State: "pausedUP", AddedAt: testNow.Add(-2 * time.Hour), LastActivity: testNow.Add(-2 * time.Hour), Category: "swarmfolio", AutoTMM: true}
 }
 
 func TestBuildFillsSpareBudgetInOpportunityOrder(t *testing.T) {
@@ -46,16 +46,13 @@ func TestBuildReplacesLowestUtilityOnly(t *testing.T) {
 	}
 }
 
-func TestBuildNeverRemovesProtectedPendingOrActive(t *testing.T) {
+func TestBuildNeverRemovesIncompleteOrActive(t *testing.T) {
 	cfg := testConfig()
-	cfg.ProtectedTags = []string{"keep"}
-	protected := torrent("protected", 40, 0)
-	protected.Tags = "swarmfolio,keep"
-	pending := torrent("pending", 40, 0)
-	pending.Tags = "swarmfolio,swarmfolio-pending"
+	incomplete := torrent("incomplete", 40, 0)
+	incomplete.Progress = .5
 	active := torrent("active", 40, 0)
 	active.UploadRate = 2
-	plan, err := Build(testNow, []Candidate{candidate("new", 30, 1, 8)}, []Torrent{protected, pending, active}, cfg)
+	plan, err := Build(testNow, []Candidate{candidate("new", 30, 1, 8)}, []Torrent{incomplete, active}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,17 +77,16 @@ func TestBuildNeverRemovesOutsideCategoryOrManualManagement(t *testing.T) {
 	}
 }
 
-func TestBuildSkipsPresentAndIneligibleCandidates(t *testing.T) {
+func TestBuildAllowsPresentAndSkipsIneligibleCandidates(t *testing.T) {
 	cfg := testConfig()
 	present := torrent("old", 20, 0)
-	present.CandidateID = "present"
 	tooOld := candidate("old", 20, 1, 9)
 	tooOld.PublishedAt = testNow.Add(-25 * time.Hour)
 	plan, err := Build(testNow, []Candidate{candidate("present", 20, 1, 9), tooOld, candidate("ok", 20, 1, 9)}, []Torrent{present}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Additions) != 1 || plan.Additions[0].Candidate.ID != "ok" {
+	if got := []string{plan.Additions[0].Candidate.ID, plan.Additions[1].Candidate.ID}; !reflect.DeepEqual(got, []string{"ok", "present"}) {
 		t.Fatalf("plan = %#v", plan)
 	}
 }

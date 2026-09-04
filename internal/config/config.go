@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,57 +20,19 @@ import (
 const Version = 1
 
 const Example = `# Swarmfolio is stateless. qBittorrent is its only persistent state.
-version = 1
-
-[portfolio]
-# Leave budget empty to derive it from disk capacity. Set it to a byte size to
-# impose an additional hard ceiling.
-budget = ""
-minimum_free_percent = 25
-# For a local qBittorrent, leave both empty and the category save path is probed.
-# For a container, set disk_path to the host-visible path. For a remote server,
-# set disk_capacity; its category and default save paths must be identical.
-disk_path = ""
-disk_capacity = ""
+# Optional settings use the documented defaults; see README for overrides.
 
 [mteam]
-base_url = "https://api.m-team.cc"
 api_key = ""
-mode = "normal"
-page_size = 100
-pages = 1
-timezone = "Asia/Shanghai"
 
 [qbittorrent]
 base_url = "http://127.0.0.1:8080"
 username = "admin"
 password = ""
-api_key = ""
-managed_tag = "swarmfolio"
-pending_tag = "swarmfolio-pending"
-protected_tags = ["keep", "archive"]
-# Existing qBittorrent category that exclusively owns Swarmfolio torrents.
-# Configure its save path and disable its separate incomplete-download path;
-# Swarmfolio enables Automatic Torrent Management.
-category = "swarmfolio"
-
-[policy]
-candidate_max_age = "72h"
-minimum_freeleech_remaining = "2h"
-minimum_leechers = 1
-minimum_opportunity_ratio = 0.1
-minimum_residency = "24h"
-minimum_idle = "6h"
-active_upload_rate = "64 KiB"
-max_additions = 2
-max_removals = 4
-
-[http]
-timeout = "30s"
 `
 
 type fileConfig struct {
-	Version     int             `toml:"version"`
+	Version     *int            `toml:"version"`
 	Portfolio   filePortfolio   `toml:"portfolio"`
 	MTeam       fileMTeam       `toml:"mteam"`
 	QBittorrent fileQBittorrent `toml:"qbittorrent"`
@@ -86,39 +48,35 @@ type filePortfolio struct {
 }
 
 type fileMTeam struct {
-	BaseURL  string `toml:"base_url"`
-	APIKey   string `toml:"api_key"`
-	Mode     string `toml:"mode"`
-	PageSize int    `toml:"page_size"`
-	Pages    int    `toml:"pages"`
-	Timezone string `toml:"timezone"`
+	BaseURL  *string `toml:"base_url"`
+	APIKey   string  `toml:"api_key"`
+	Mode     *string `toml:"mode"`
+	PageSize *int    `toml:"page_size"`
+	Pages    *int    `toml:"pages"`
+	Timezone *string `toml:"timezone"`
 }
 
 type fileQBittorrent struct {
-	BaseURL       string   `toml:"base_url"`
-	Username      string   `toml:"username"`
-	Password      string   `toml:"password"`
-	APIKey        string   `toml:"api_key"`
-	ManagedTag    string   `toml:"managed_tag"`
-	PendingTag    string   `toml:"pending_tag"`
-	ProtectedTags []string `toml:"protected_tags"`
-	Category      *string  `toml:"category"`
+	BaseURL  string  `toml:"base_url"`
+	Username string  `toml:"username"`
+	Password string  `toml:"password"`
+	Category *string `toml:"category"`
 }
 
 type filePolicy struct {
-	CandidateMaxAge           string  `toml:"candidate_max_age"`
-	MinimumFreeleechRemaining string  `toml:"minimum_freeleech_remaining"`
-	MinimumLeechers           int     `toml:"minimum_leechers"`
-	MinimumOpportunityRatio   float64 `toml:"minimum_opportunity_ratio"`
-	MinimumResidency          string  `toml:"minimum_residency"`
-	MinimumIdle               string  `toml:"minimum_idle"`
-	ActiveUploadRate          string  `toml:"active_upload_rate"`
-	MaxAdditions              int     `toml:"max_additions"`
-	MaxRemovals               int     `toml:"max_removals"`
+	CandidateMaxAge           *string  `toml:"candidate_max_age"`
+	MinimumFreeleechRemaining *string  `toml:"minimum_freeleech_remaining"`
+	MinimumLeechers           *int     `toml:"minimum_leechers"`
+	MinimumOpportunityRatio   *float64 `toml:"minimum_opportunity_ratio"`
+	MinimumResidency          *string  `toml:"minimum_residency"`
+	MinimumIdle               *string  `toml:"minimum_idle"`
+	ActiveUploadRate          *string  `toml:"active_upload_rate"`
+	MaxAdditions              *int     `toml:"max_additions"`
+	MaxRemovals               *int     `toml:"max_removals"`
 }
 
 type fileHTTP struct {
-	Timeout string `toml:"timeout"`
+	Timeout *string `toml:"timeout"`
 }
 
 type Settings struct {
@@ -147,14 +105,10 @@ type MTeam struct {
 }
 
 type QBittorrent struct {
-	BaseURL       string
-	Username      string
-	Password      string
-	APIKey        string
-	ManagedTag    string
-	PendingTag    string
-	ProtectedTags []string
-	Category      string
+	BaseURL  string
+	Username string
+	Password string
+	Category string
 }
 
 type Policy struct {
@@ -185,11 +139,26 @@ func Load(path string) (Settings, error) {
 			return Settings{}, err
 		}
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Settings{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-	settings, err := Parse(data, os.Getenv)
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return Settings{}, fmt.Errorf("inspect config %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return Settings{}, fmt.Errorf("config %q must be a regular file", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return Settings{}, fmt.Errorf("config %q contains credentials and must not be accessible by group or others (mode %04o)", path, info.Mode().Perm())
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return Settings{}, fmt.Errorf("read config %q: %w", path, err)
+	}
+	settings, err := Parse(data)
 	if err != nil {
 		return Settings{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
@@ -197,15 +166,15 @@ func Load(path string) (Settings, error) {
 	return settings, nil
 }
 
-func Parse(data []byte, getenv func(string) string) (Settings, error) {
+func Parse(data []byte) (Settings, error) {
 	var raw fileConfig
 	decoder := toml.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&raw); err != nil {
 		return Settings{}, err
 	}
-	if raw.Version != Version {
-		return Settings{}, fmt.Errorf("version must be %d, got %d", Version, raw.Version)
+	if raw.Version != nil && *raw.Version != Version {
+		return Settings{}, fmt.Errorf("version must be %d, got %d", Version, *raw.Version)
 	}
 
 	budget, err := optionalBytes("portfolio.budget", raw.Portfolio.Budget)
@@ -220,47 +189,42 @@ func Parse(data []byte, getenv func(string) string) (Settings, error) {
 	if raw.Portfolio.MinimumFreePercent != nil {
 		minimumFreePercent = *raw.Portfolio.MinimumFreePercent
 	}
-	candidateMaxAge, err := positiveDuration("policy.candidate_max_age", raw.Policy.CandidateMaxAge)
+	candidateMaxAge, err := positiveDuration("policy.candidate_max_age", defaultString(raw.Policy.CandidateMaxAge, "72h"))
 	if err != nil {
 		return Settings{}, err
 	}
-	freeRemaining, err := nonnegativeDuration("policy.minimum_freeleech_remaining", raw.Policy.MinimumFreeleechRemaining)
+	freeRemaining, err := nonnegativeDuration("policy.minimum_freeleech_remaining", defaultString(raw.Policy.MinimumFreeleechRemaining, "2h"))
 	if err != nil {
 		return Settings{}, err
 	}
-	residency, err := nonnegativeDuration("policy.minimum_residency", raw.Policy.MinimumResidency)
+	residency, err := nonnegativeDuration("policy.minimum_residency", defaultString(raw.Policy.MinimumResidency, "24h"))
 	if err != nil {
 		return Settings{}, err
 	}
-	idle, err := nonnegativeDuration("policy.minimum_idle", raw.Policy.MinimumIdle)
+	idle, err := nonnegativeDuration("policy.minimum_idle", defaultString(raw.Policy.MinimumIdle, "6h"))
 	if err != nil {
 		return Settings{}, err
 	}
-	uploadRate, err := ParseBytes(raw.Policy.ActiveUploadRate)
+	uploadRate, err := ParseBytes(defaultString(raw.Policy.ActiveUploadRate, "64 KiB"))
 	if err != nil {
 		return Settings{}, fmt.Errorf("policy.active_upload_rate: %w", err)
 	}
-	timeout, err := positiveDuration("http.timeout", raw.HTTP.Timeout)
+	timeout, err := positiveDuration("http.timeout", defaultString(raw.HTTP.Timeout, "30s"))
 	if err != nil {
 		return Settings{}, err
 	}
-	location, err := time.LoadLocation(raw.MTeam.Timezone)
+	zone := defaultString(raw.MTeam.Timezone, "Asia/Shanghai")
+	if zone == "" {
+		return Settings{}, errors.New("mteam.timezone is required when set")
+	}
+	location, err := time.LoadLocation(zone)
 	if err != nil {
 		return Settings{}, fmt.Errorf("mteam.timezone: %w", err)
 	}
 
-	mteamKey := firstNonempty(getenv("SWARMFOLIO_MTEAM_API_KEY"), raw.MTeam.APIKey)
-	qbtPassword := firstNonempty(getenv("SWARMFOLIO_QBITTORRENT_PASSWORD"), raw.QBittorrent.Password)
-	qbtAPIKey := firstNonempty(getenv("SWARMFOLIO_QBITTORRENT_API_KEY"), raw.QBittorrent.APIKey)
-	managedTag := firstNonempty(raw.QBittorrent.ManagedTag, "swarmfolio")
-	pendingTag := firstNonempty(raw.QBittorrent.PendingTag, managedTag+"-pending")
 	category := "swarmfolio"
 	if raw.QBittorrent.Category != nil {
 		category = *raw.QBittorrent.Category
-	}
-	protectedTags := raw.QBittorrent.ProtectedTags
-	if protectedTags == nil {
-		protectedTags = []string{"keep", "archive"}
 	}
 	settings := Settings{
 		Portfolio: Portfolio{
@@ -268,23 +232,20 @@ func Parse(data []byte, getenv func(string) string) (Settings, error) {
 			DiskPath: raw.Portfolio.DiskPath, DiskCapacityBytes: diskCapacity,
 		},
 		MTeam: MTeam{
-			BaseURL: strings.TrimRight(raw.MTeam.BaseURL, "/"), APIKey: mteamKey,
-			Mode: raw.MTeam.Mode, PageSize: raw.MTeam.PageSize, Pages: raw.MTeam.Pages,
+			BaseURL: strings.TrimRight(defaultString(raw.MTeam.BaseURL, "https://api.m-team.cc"), "/"), APIKey: raw.MTeam.APIKey,
+			Mode: defaultString(raw.MTeam.Mode, "normal"), PageSize: defaultInt(raw.MTeam.PageSize, 100), Pages: defaultInt(raw.MTeam.Pages, 1),
 			Location: location,
 		},
 		QBittorrent: QBittorrent{
 			BaseURL:  strings.TrimRight(raw.QBittorrent.BaseURL, "/"),
-			Username: raw.QBittorrent.Username, Password: qbtPassword, APIKey: qbtAPIKey,
-			ManagedTag: managedTag, PendingTag: pendingTag,
-			ProtectedTags: slices.Clone(protectedTags),
-			Category:      category,
+			Username: raw.QBittorrent.Username, Password: raw.QBittorrent.Password, Category: category,
 		},
 		Policy: Policy{
 			CandidateMaxAge: candidateMaxAge, MinimumFreeleechRemaining: freeRemaining,
-			MinimumLeechers:         raw.Policy.MinimumLeechers,
-			MinimumOpportunityRatio: raw.Policy.MinimumOpportunityRatio,
+			MinimumLeechers:         defaultInt(raw.Policy.MinimumLeechers, 1),
+			MinimumOpportunityRatio: defaultFloat64(raw.Policy.MinimumOpportunityRatio, 0.1),
 			MinimumResidency:        residency, MinimumIdle: idle, ActiveUploadRate: uploadRate,
-			MaxAdditions: raw.Policy.MaxAdditions, MaxRemovals: raw.Policy.MaxRemovals,
+			MaxAdditions: defaultInt(raw.Policy.MaxAdditions, 2), MaxRemovals: defaultInt(raw.Policy.MaxRemovals, 4),
 		},
 		HTTPTimeout: timeout,
 	}
@@ -309,7 +270,7 @@ func (settings Settings) validate() error {
 		return err
 	}
 	if settings.MTeam.APIKey == "" {
-		return errors.New("mteam.api_key or SWARMFOLIO_MTEAM_API_KEY is required")
+		return errors.New("mteam.api_key is required")
 	}
 	if settings.MTeam.Mode == "" {
 		return errors.New("mteam.mode is required")
@@ -323,44 +284,12 @@ func (settings Settings) validate() error {
 	if err := validateURL("qbittorrent.base_url", settings.QBittorrent.BaseURL); err != nil {
 		return err
 	}
-	if settings.QBittorrent.APIKey == "" && (settings.QBittorrent.Username == "" || settings.QBittorrent.Password == "") {
-		return errors.New("qbittorrent API key or username and password are required")
-	}
-	if settings.QBittorrent.ManagedTag == "" || settings.QBittorrent.PendingTag == "" {
-		return errors.New("qbittorrent managed_tag and pending_tag are required")
+	if settings.QBittorrent.Username == "" || settings.QBittorrent.Password == "" {
+		return errors.New("qbittorrent.username and qbittorrent.password are required")
 	}
 	if settings.QBittorrent.Category == "" || strings.TrimSpace(settings.QBittorrent.Category) != settings.QBittorrent.Category ||
 		strings.ContainsAny(settings.QBittorrent.Category, "\r\n\x00") {
 		return errors.New("qbittorrent.category must be nonempty, trimmed, and contain no line breaks")
-	}
-	for name, tag := range map[string]string{
-		"qbittorrent.managed_tag": settings.QBittorrent.ManagedTag,
-		"qbittorrent.pending_tag": settings.QBittorrent.PendingTag,
-	} {
-		if strings.TrimSpace(tag) != tag || strings.Contains(tag, ",") {
-			return fmt.Errorf("%s must not contain surrounding whitespace or commas", name)
-		}
-	}
-	if settings.QBittorrent.ManagedTag == settings.QBittorrent.PendingTag {
-		return errors.New("qbittorrent managed_tag and pending_tag must differ")
-	}
-	idTagPrefix := settings.QBittorrent.ManagedTag + "-id-"
-	if strings.HasPrefix(settings.QBittorrent.PendingTag, idTagPrefix) {
-		return errors.New("qbittorrent.pending_tag conflicts with reserved candidate ID tags")
-	}
-	seenProtected := make(map[string]bool, len(settings.QBittorrent.ProtectedTags))
-	for _, tag := range settings.QBittorrent.ProtectedTags {
-		if tag == "" || strings.TrimSpace(tag) != tag || strings.Contains(tag, ",") || strings.HasPrefix(tag, idTagPrefix) {
-			return fmt.Errorf("invalid qbittorrent protected tag %q", tag)
-		}
-		if seenProtected[tag] {
-			return fmt.Errorf("duplicate qbittorrent protected tag %q", tag)
-		}
-		seenProtected[tag] = true
-	}
-	if slices.Contains(settings.QBittorrent.ProtectedTags, settings.QBittorrent.ManagedTag) ||
-		slices.Contains(settings.QBittorrent.ProtectedTags, settings.QBittorrent.PendingTag) {
-		return errors.New("protected_tags cannot contain the managed or pending tag")
 	}
 	if settings.Policy.MinimumLeechers < 0 || settings.Policy.MinimumOpportunityRatio < 0 ||
 		math.IsNaN(settings.Policy.MinimumOpportunityRatio) || math.IsInf(settings.Policy.MinimumOpportunityRatio, 0) {
@@ -438,11 +367,23 @@ func nonnegativeDuration(name, value string) (time.Duration, error) {
 	return duration, nil
 }
 
-func firstNonempty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
+func defaultString(value *string, fallback string) string {
+	if value == nil {
+		return fallback
 	}
-	return ""
+	return *value
+}
+
+func defaultInt(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
+}
+
+func defaultFloat64(value *float64, fallback float64) float64 {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }

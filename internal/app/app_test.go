@@ -45,7 +45,7 @@ func TestExecuteAppliesPausedAdditionBeforeDeletion(t *testing.T) {
 		t.Fatalf("report = %#v", report)
 	}
 	joined := strings.Join(qbt.events, ",")
-	for _, sequence := range []string{"add", "delete:old", "start:", "remove-tags:"} {
+	for _, sequence := range []string{"add", "delete:old", "start:"} {
 		if !strings.Contains(joined, sequence) {
 			t.Fatalf("events %q do not contain %q", joined, sequence)
 		}
@@ -53,7 +53,7 @@ func TestExecuteAppliesPausedAdditionBeforeDeletion(t *testing.T) {
 	if index(qbt.events, "add") > prefixIndex(qbt.events, "delete:old") {
 		t.Fatalf("candidate was not added before removal: %v", qbt.events)
 	}
-	if len(qbt.torrents) != 1 || qbt.torrents[0].Name != "new" || slices.Contains(qbt.torrents[0].Tags, "swarmfolio-pending") {
+	if len(qbt.torrents) != 1 || qbt.torrents[0].Name != "new" || qbt.torrents[0].State != "downloading" {
 		t.Fatalf("final torrents = %#v", qbt.torrents)
 	}
 	if qbt.addSavePath != "/downloads/swarmfolio" {
@@ -66,8 +66,7 @@ func TestExecuteRemovesExpiredEmptyPendingTorrent(t *testing.T) {
 	qbt := &fakeQBT{defaultPath: "/downloads", categoryPath: "/downloads/swarmfolio", torrents: []qbittorrent.Torrent{{
 		Hash: "pending", Name: "pending", Size: 30, AmountLeft: 30,
 		AddedOn: appNow.Add(-time.Hour), LastActivity: appNow.Add(-time.Hour), SavePath: "/downloads/swarmfolio/pending",
-		Category: "swarmfolio", AutoTMM: true,
-		State: "stoppedDL", Tags: []string{"swarmfolio", "swarmfolio-pending", "swarmfolio-id-9"},
+		Category: "swarmfolio", AutoTMM: true, State: "stoppedDL",
 	}}}
 	mt := &fakeMTeam{results: []mteam.Torrent{{
 		ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
@@ -110,9 +109,30 @@ func TestExecuteStopsBeforeStartingWhenFreeBudgetChangesAfterDeletion(t *testing
 	if err == nil || !strings.Contains(err.Error(), "after deletion") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(qbt.torrents) != 1 || qbt.torrents[0].Name != "new" || !slices.Contains(qbt.torrents[0].Tags, "swarmfolio-pending") ||
+	if len(qbt.torrents) != 1 || qbt.torrents[0].Name != "new" || qbt.torrents[0].State != "stoppedDL" ||
 		prefixIndex(qbt.events, "start:") >= 0 {
 		t.Fatalf("candidate should remain stopped and recoverable: events=%v torrents=%#v", qbt.events, qbt.torrents)
+	}
+}
+
+func TestExecuteDoesNotStartAdditionAfterItLeavesCategory(t *testing.T) {
+	t.Parallel()
+	qbt, mt := testServices(t)
+	runner := testRunner(qbt, mt)
+	mutated := false
+	runner.ProbeDisk = func(string) (disk.Space, error) {
+		if !mutated && prefixIndex(qbt.events, "delete:old") >= 0 {
+			qbt.torrents[0].Category = "user-managed"
+			mutated = true
+		}
+		return disk.Space{CapacityBytes: 100, FreeBytes: qbt.free()}, nil
+	}
+	_, err := runner.Execute(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "no longer safe") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(qbt.torrents) != 1 || qbt.torrents[0].Category != "user-managed" || prefixIndex(qbt.events, "start:") >= 0 {
+		t.Fatalf("addition that left the category was started: events=%v torrents=%#v", qbt.events, qbt.torrents)
 	}
 }
 
@@ -142,16 +162,17 @@ func TestExecuteRollsBackWhenRemovalLeavesManagedCategory(t *testing.T) {
 	}
 }
 
-func TestExecuteRollsBackAdditionThatDoesNotMatchStoppedTaggedPlan(t *testing.T) {
+func TestExecuteRollsBackAdditionThatStartsUnexpectedly(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
-	qbt.onAdd = func(q *fakeQBT) { q.torrents[len(q.torrents)-1].Tags = nil }
+	qbt.onAdd = func(q *fakeQBT) { q.torrents[len(q.torrents)-1].State = "downloading" }
 	_, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(qbt.torrents) != 1 || qbt.torrents[0].Hash != "old" || prefixIndex(qbt.events, "delete:old") >= 0 {
-		t.Fatalf("only the invalid addition should be rolled back: events=%v torrents=%#v", qbt.events, qbt.torrents)
+	if len(qbt.torrents) != 2 || qbt.torrents[1].State != "downloading" || prefixIndex(qbt.events, "delete:") >= 0 ||
+		!strings.Contains(err.Error(), "refuse to roll back") {
+		t.Fatalf("changed addition should be left untouched: error=%v events=%v torrents=%#v", err, qbt.events, qbt.torrents)
 	}
 }
 
@@ -163,8 +184,22 @@ func TestExecuteRollsBackAdditionWithoutAutomaticManagement(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "automatically managed") {
 		t.Fatalf("error = %v", err)
 	}
-	if len(qbt.torrents) != 1 || qbt.torrents[0].Hash != "old" || prefixIndex(qbt.events, "delete:old") >= 0 {
-		t.Fatalf("only the manually managed addition should be rolled back: events=%v torrents=%#v", qbt.events, qbt.torrents)
+	if len(qbt.torrents) != 2 || qbt.torrents[1].AutoTMM || prefixIndex(qbt.events, "delete:") >= 0 ||
+		!strings.Contains(err.Error(), "refuse to roll back") {
+		t.Fatalf("manually managed addition should be left untouched: error=%v events=%v torrents=%#v", err, qbt.events, qbt.torrents)
+	}
+}
+
+func TestExecuteRefusesRollbackAfterAdditionLeavesCategory(t *testing.T) {
+	t.Parallel()
+	qbt, mt := testServices(t)
+	qbt.onAdd = func(q *fakeQBT) { q.torrents[len(q.torrents)-1].Category = "user-managed" }
+	_, err := testRunner(qbt, mt).Execute(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "refuse to roll back") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(qbt.torrents) != 2 || qbt.torrents[1].Category != "user-managed" || prefixIndex(qbt.events, "delete:") >= 0 {
+		t.Fatalf("addition that left the category should be untouched: events=%v torrents=%#v", qbt.events, qbt.torrents)
 	}
 }
 
@@ -194,20 +229,24 @@ func TestExecuteRejectsRemoteBudgetForDifferentCategoryFilesystem(t *testing.T) 
 
 func TestExecuteRecoversSafePendingTorrent(t *testing.T) {
 	t.Parallel()
+	metainfoBytes := []byte("d4:infod6:lengthi30e4:name7:pendingee")
+	hash, err := metainfo.InfoHash(metainfoBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	qbt := &fakeQBT{
 		defaultPath: "/downloads", categoryPath: "/downloads/swarmfolio",
 		torrents: []qbittorrent.Torrent{{
-			Hash: "pending", Name: "pending", Size: 30, AmountLeft: 30,
+			Hash: hash, Name: "pending", Size: 30, AmountLeft: 30,
 			AddedOn: appNow.Add(-time.Hour), LastActivity: appNow.Add(-time.Hour),
 			SavePath: "/downloads/swarmfolio/pending", State: "stoppedDL",
 			Category: "swarmfolio", AutoTMM: true,
-			Tags: []string{"swarmfolio", "swarmfolio-pending", "swarmfolio-id-9"},
 		}},
 	}
 	mt := &fakeMTeam{results: []mteam.Torrent{{
 		ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
 		PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour),
-	}}}
+	}}, metainfo: metainfoBytes}
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
@@ -215,19 +254,133 @@ func TestExecuteRecoversSafePendingTorrent(t *testing.T) {
 	if len(report.Recoveries) != 1 || report.Recoveries[0].Action != "resume" {
 		t.Fatalf("recoveries = %#v", report.Recoveries)
 	}
-	if slices.Contains(qbt.torrents[0].Tags, "swarmfolio-pending") {
-		t.Fatal("pending tag was not removed")
+	if qbt.torrents[0].State != "downloading" {
+		t.Fatalf("pending torrent state = %q, want downloading", qbt.torrents[0].State)
+	}
+}
+
+func TestExecuteRefusesRecoveryAfterPendingStateChanges(t *testing.T) {
+	t.Parallel()
+	pendingMetainfo := []byte("d4:infod6:lengthi30e4:name7:pendingee")
+	pendingHash, err := metainfo.InfoHash(pendingMetainfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongMetainfo := []byte("d4:infod6:lengthi30e4:name5:wrongee")
+	tests := []struct {
+		name     string
+		metainfo []byte
+		mutate   func(*qbittorrent.Torrent)
+	}{
+		{
+			name: "category changes before stale removal", metainfo: wrongMetainfo,
+			mutate: func(torrent *qbittorrent.Torrent) { torrent.Category = "user-managed" },
+		},
+		{
+			name: "torrent starts before resume", metainfo: pendingMetainfo,
+			mutate: func(torrent *qbittorrent.Torrent) { torrent.State = "downloading" },
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			qbt := pendingQBT(pendingHash)
+			mt := &fakeMTeam{
+				results: []mteam.Torrent{{
+					ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
+					PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour),
+				}},
+				metainfo: test.metainfo,
+				onDownload: func(int64) {
+					test.mutate(&qbt.torrents[0])
+				},
+			}
+			_, err := testRunner(qbt, mt).Execute(context.Background(), true)
+			if err == nil || !strings.Contains(err.Error(), "no longer safe") {
+				t.Fatalf("error = %v", err)
+			}
+			if len(qbt.torrents) != 1 || prefixIndex(qbt.events, "delete:") >= 0 || prefixIndex(qbt.events, "start:") >= 0 {
+				t.Fatalf("changed pending torrent was mutated: events=%v torrents=%#v", qbt.events, qbt.torrents)
+			}
+		})
+	}
+}
+
+func TestExecuteRecoversAmbiguousPendingTorrentByExactHash(t *testing.T) {
+	t.Parallel()
+	pendingMetainfo := []byte("d4:infod6:lengthi30e4:name7:pendingee")
+	pendingHash, err := metainfo.InfoHash(pendingMetainfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qbt := pendingQBT(pendingHash)
+	mt := &fakeMTeam{
+		results: []mteam.Torrent{
+			{ID: 8, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour)},
+			{ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour)},
+		},
+		metainfoByID: map[int64][]byte{
+			8: []byte("d4:infod6:lengthi30e4:name5:wrongee"),
+			9: pendingMetainfo,
+		},
+	}
+	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mt.downloads != 2 || len(report.Recoveries) != 1 || report.Recoveries[0].Action != "resume" || qbt.torrents[0].State != "downloading" {
+		t.Fatalf("downloads=%d recoveries=%#v torrents=%#v", mt.downloads, report.Recoveries, qbt.torrents)
+	}
+}
+
+func TestExecuteSkipsCandidateAlreadyPresentByCategoryNameAndSize(t *testing.T) {
+	t.Parallel()
+	qbt, mt := testServices(t)
+	qbt.torrents[0].Name = "new"
+	qbt.torrents[0].Size = 30
+	report, err := testRunner(qbt, mt).Execute(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Actions) != 0 || mt.downloads != 0 {
+		t.Fatalf("report=%#v downloads=%d", report, mt.downloads)
+	}
+}
+
+func TestExecuteDoesNotTreatAnotherCategoryAsPresent(t *testing.T) {
+	t.Parallel()
+	qbt, mt := testServices(t)
+	qbt.torrents[0].Name = "new"
+	qbt.torrents[0].Size = 30
+	qbt.torrents[0].Category = "user-managed"
+	qbt.torrents[0].SavePath = "/downloads/user/new"
+	report, err := testRunner(qbt, mt).Execute(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Actions) != 1 || report.Actions[0].CandidateID != "2" || mt.downloads != 0 {
+		t.Fatalf("report=%#v downloads=%d", report, mt.downloads)
+	}
+}
+
+func pendingQBT(hash string) *fakeQBT {
+	return &fakeQBT{
+		defaultPath: "/downloads", categoryPath: "/downloads/swarmfolio",
+		torrents: []qbittorrent.Torrent{{
+			Hash: hash, Name: "pending", Size: 30, AmountLeft: 30,
+			AddedOn: appNow.Add(-time.Hour), LastActivity: appNow.Add(-time.Hour),
+			SavePath: "/downloads/swarmfolio/pending", State: "stoppedDL",
+			Category: "swarmfolio", AutoTMM: true,
+		}},
 	}
 }
 
 func testRunner(qbt *fakeQBT, mt *fakeMTeam) Runner {
 	return Runner{
 		Config: config.Settings{
-			Portfolio: config.Portfolio{MinimumFreePercent: 25, DiskPath: "/host/downloads"},
-			QBittorrent: config.QBittorrent{
-				ManagedTag: "swarmfolio", PendingTag: "swarmfolio-pending",
-				ProtectedTags: []string{"keep"}, Category: "swarmfolio",
-			},
+			Portfolio:   config.Portfolio{MinimumFreePercent: 25, DiskPath: "/host/downloads"},
+			QBittorrent: config.QBittorrent{Category: "swarmfolio"},
 			Policy: config.Policy{
 				CandidateMaxAge: 24 * time.Hour, MinimumFreeleechRemaining: time.Hour,
 				MinimumLeechers: 1, MinimumOpportunityRatio: 0.5,
@@ -256,7 +409,7 @@ func testServices(t *testing.T) (*fakeQBT, *fakeMTeam) {
 			Hash: "old", Name: "old", Size: 70, Uploaded: 1, Progress: 1,
 			AddedOn: appNow.Add(-2 * time.Hour), LastActivity: appNow.Add(-2 * time.Hour),
 			SavePath: "/downloads/swarmfolio/old", State: "stoppedUP",
-			Category: "swarmfolio", AutoTMM: true, Tags: []string{"swarmfolio", "swarmfolio-id-1"},
+			Category: "swarmfolio", AutoTMM: true,
 		}},
 	}
 	mt := &fakeMTeam{
@@ -301,7 +454,6 @@ func (q *fakeQBT) Add(_ context.Context, request qbittorrent.AddRequest) error {
 		Hash: q.addHash, Name: "new", Size: q.addSize, AmountLeft: q.addSize,
 		AddedOn: appNow, LastActivity: appNow, SavePath: request.SavePath + "/new",
 		State: "stoppedDL", Category: request.Category, AutoTMM: request.AutoTMM,
-		Tags: slices.Clone(request.Tags),
 	})
 	if q.onAdd != nil {
 		q.onAdd(q)
@@ -312,26 +464,6 @@ func (q *fakeQBT) Delete(_ context.Context, hashes []string, _ bool) error {
 	q.events = append(q.events, "delete:"+strings.Join(hashes, "|"))
 	q.mutations++
 	q.torrents = slices.DeleteFunc(q.torrents, func(torrent qbittorrent.Torrent) bool { return slices.Contains(hashes, torrent.Hash) })
-	return nil
-}
-func (q *fakeQBT) AddTags(_ context.Context, hashes, tags []string) error {
-	q.events = append(q.events, "add-tags:"+strings.Join(hashes, "|"))
-	q.mutations++
-	for i := range q.torrents {
-		if slices.Contains(hashes, q.torrents[i].Hash) {
-			q.torrents[i].Tags = append(q.torrents[i].Tags, tags...)
-		}
-	}
-	return nil
-}
-func (q *fakeQBT) RemoveTags(_ context.Context, hashes, tags []string) error {
-	q.events = append(q.events, "remove-tags:"+strings.Join(hashes, "|"))
-	q.mutations++
-	for i := range q.torrents {
-		if slices.Contains(hashes, q.torrents[i].Hash) {
-			q.torrents[i].Tags = slices.DeleteFunc(q.torrents[i].Tags, func(tag string) bool { return slices.Contains(tags, tag) })
-		}
-	}
 	return nil
 }
 func (q *fakeQBT) Start(_ context.Context, hashes []string) error {
@@ -354,16 +486,24 @@ func (q *fakeQBT) free() int64 {
 }
 
 type fakeMTeam struct {
-	results   []mteam.Torrent
-	metainfo  []byte
-	downloads int
+	results      []mteam.Torrent
+	metainfo     []byte
+	metainfoByID map[int64][]byte
+	onDownload   func(int64)
+	downloads    int
 }
 
 func (m *fakeMTeam) Search(context.Context) ([]mteam.Torrent, error) {
 	return slices.Clone(m.results), nil
 }
-func (m *fakeMTeam) Download(context.Context, int64) ([]byte, error) {
+func (m *fakeMTeam) Download(_ context.Context, id int64) ([]byte, error) {
 	m.downloads++
+	if m.onDownload != nil {
+		m.onDownload(id)
+	}
+	if metainfoBytes, ok := m.metainfoByID[id]; ok {
+		return slices.Clone(metainfoBytes), nil
+	}
 	return slices.Clone(m.metainfo), nil
 }
 

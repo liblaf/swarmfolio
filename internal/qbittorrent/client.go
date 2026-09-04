@@ -25,7 +25,6 @@ type Config struct {
 	BaseURL    string
 	Username   string
 	Password   string
-	APIKey     string
 	HTTPClient *http.Client
 }
 
@@ -33,7 +32,6 @@ type Config struct {
 type Client struct {
 	baseURL  *url.URL
 	origin   string
-	apiKey   string
 	username string
 	password string
 	http     *http.Client
@@ -60,7 +58,6 @@ type Torrent struct {
 	SavePath     string
 	Category     string
 	AutoTMM      bool
-	Tags         []string
 }
 
 // AddRequest is the data qBittorrent needs to add one torrent.
@@ -69,19 +66,17 @@ type AddRequest struct {
 	MetainfoName string
 	SavePath     string
 	Category     string
-	Tags         []string
 	Stopped      bool
 	AutoTMM      bool
 }
 
-// New constructs a client. API-key authentication takes precedence over the
-// cookie-based login flow.
+// New constructs a client using qBittorrent's cookie-based login flow.
 func New(config Config) (*Client, error) {
 	if config.BaseURL == "" {
 		return nil, errors.New("qBittorrent base URL is required")
 	}
-	if config.APIKey == "" && (config.Username == "" || config.Password == "") {
-		return nil, errors.New("qBittorrent username and password are required without an API key")
+	if config.Username == "" || config.Password == "" {
+		return nil, errors.New("qBittorrent username and password are required")
 	}
 	u, err := url.Parse(config.BaseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -96,7 +91,7 @@ func New(config Config) (*Client, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	if config.APIKey == "" && client.Jar == nil {
+	if client.Jar == nil {
 		jar, err := cookiejar.New(nil)
 		if err != nil {
 			return nil, fmt.Errorf("create cookie jar: %w", err)
@@ -109,18 +104,14 @@ func New(config Config) (*Client, error) {
 	return &Client{
 		baseURL:  u,
 		origin:   (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(),
-		apiKey:   config.APIKey,
 		username: config.Username,
 		password: config.Password,
 		http:     client,
 	}, nil
 }
 
-// Login establishes a qBittorrent session. It is a no-op when APIKey is set.
+// Login establishes a qBittorrent session.
 func (c *Client) Login(ctx context.Context) error {
-	if c.apiKey != "" {
-		return nil
-	}
 	form := url.Values{"username": {c.username}, "password": {c.password}}
 	return c.login(ctx, form)
 }
@@ -278,7 +269,6 @@ func (c *Client) Add(ctx context.Context, request AddRequest) error {
 	for key, value := range map[string]string{
 		"savepath": request.SavePath,
 		"category": request.Category,
-		"tags":     strings.Join(request.Tags, ","),
 		"stopped":  strconv.FormatBool(request.Stopped),
 		"paused":   strconv.FormatBool(request.Stopped),
 		"autoTMM":  strconv.FormatBool(request.AutoTMM),
@@ -305,16 +295,6 @@ func (c *Client) Delete(ctx context.Context, hashes []string, deleteFiles bool) 
 	})
 }
 
-// AddTags adds comma-separated tags to torrents.
-func (c *Client) AddTags(ctx context.Context, hashes, tags []string) error {
-	return c.tags(ctx, "torrents/addTags", hashes, tags)
-}
-
-// RemoveTags removes comma-separated tags from torrents.
-func (c *Client) RemoveTags(ctx context.Context, hashes, tags []string) error {
-	return c.tags(ctx, "torrents/removeTags", hashes, tags)
-}
-
 // Start resumes torrents.
 func (c *Client) Start(ctx context.Context, hashes []string) error {
 	if err := validateHashes(hashes); err != nil {
@@ -325,24 +305,6 @@ func (c *Client) Start(ctx context.Context, hashes []string) error {
 
 func (c *Client) login(ctx context.Context, form url.Values) error {
 	return c.formMutate(ctx, "auth/login", form)
-}
-
-func (c *Client) tags(ctx context.Context, endpoint string, hashes, tags []string) error {
-	if err := validateHashes(hashes); err != nil {
-		return err
-	}
-	if len(tags) == 0 {
-		return errors.New("qBittorrent tag mutation requires at least one tag")
-	}
-	for _, tag := range tags {
-		if tag == "" || strings.Contains(tag, ",") {
-			return fmt.Errorf("invalid qBittorrent tag %q", tag)
-		}
-	}
-	return c.formMutate(ctx, endpoint, url.Values{
-		"hashes": {strings.Join(hashes, "|")},
-		"tags":   {strings.Join(tags, ",")},
-	})
 }
 
 func validateHashes(hashes []string) error {
@@ -382,9 +344,6 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body io.R
 	request.Header.Set("Referer", c.origin+"/")
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
-	}
-	if c.apiKey != "" {
-		request.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -427,7 +386,6 @@ type torrentResponse struct {
 	SavePath     string  `json:"save_path"`
 	Category     string  `json:"category"`
 	AutoTMM      bool    `json:"auto_tmm"`
-	Tags         string  `json:"tags"`
 }
 
 func (response torrentResponse) torrent() Torrent {
@@ -450,19 +408,7 @@ func (response torrentResponse) torrent() Torrent {
 		SavePath:     response.SavePath,
 		Category:     response.Category,
 		AutoTMM:      response.AutoTMM,
-		Tags:         splitTags(response.Tags),
 	}
-}
-
-func splitTags(value string) []string {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	for index := range parts {
-		parts[index] = strings.TrimSpace(parts[index])
-	}
-	return parts
 }
 
 func unixTime(seconds int64) time.Time {

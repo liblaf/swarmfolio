@@ -18,10 +18,9 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 ## ✨ Safety Model
 
 - qBittorrent is the only persistent source of truth. Swarmfolio has no database or cache.
-- The default ownership tag and category are both `swarmfolio`. A torrent must have that tag, belong to that category, and use Automatic Torrent Management before it can be deleted.
-- `keep` and `archive` are protected by default; configured protected tags always win.
+- The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
-- New torrents are added stopped with a `swarmfolio-pending` tag before any old data is removed. An interrupted run is recovered from those qBittorrent tags on the next applied run.
+- New torrents are added stopped before any old data is removed. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
 - Applied runs use an XDG runtime lock, so two Swarmfolio processes cannot delete from the same portfolio concurrently.
 - Candidate API responses, disk accounting, torrent metadata, and state changes are validated; unexpected state stops the run visibly.
 
@@ -41,7 +40,7 @@ Alternatively, build it with Go 1.25 or newer:
 go install github.com/liblaf/swarmfolio/cmd/swarmfolio@latest
 ```
 
-Swarmfolio targets qBittorrent 5.0 or newer. qBittorrent 5.2 or newer can use an API key; older supported versions use WebUI username/password login.
+Swarmfolio targets qBittorrent 5.0 or newer and uses WebUI username/password login.
 
 ## ⚙️ Configuration
 
@@ -52,26 +51,23 @@ swarmfolio config init
 ${EDITOR:-vi} "$(swarmfolio config path)"
 ```
 
-The generated file documents every setting. Its important defaults are:
+The generated mode-`0600` file contains only the four required values:
 
-- `qbittorrent.managed_tag = "swarmfolio"`;
-- `qbittorrent.category = "swarmfolio"`;
-- no hard byte ceiling unless `portfolio.budget` is set;
-- at least `portfolio.minimum_free_percent = 25` of the download disk remains free;
-- at most two additions and four removals per hourly run.
+```toml
+[mteam]
+api_key = "replace-me"
+
+[qbittorrent]
+base_url = "http://127.0.0.1:8080"
+username = "admin"
+password = "replace-me"
+```
+
+Everything else has an application default: category `swarmfolio`, no hard byte ceiling, at least 25% of the download disk free, and at most two additions and four removals per hourly run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected.
 
 The disk limit accounts for both current free space and every unfinished byte already promised to qBittorrent. For local qBittorrent, Swarmfolio probes the configured category's save path. Set `portfolio.disk_path` to the host-visible mount for a container. For a remote host, `portfolio.disk_capacity` can use qBittorrent's reported free space only when the category and default save paths are identical; otherwise run Swarmfolio where it can probe the category filesystem.
 
-Swarmfolio manages torrents only in its required `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte.
-
-Keep credentials in the mode-`0600` config or in `${XDG_CONFIG_HOME:-$HOME/.config}/swarmfolio/environment`:
-
-```bash
-SWARMFOLIO_MTEAM_API_KEY=replace-me
-SWARMFOLIO_QBITTORRENT_PASSWORD=replace-me
-# qBittorrent >= 5.2 alternative:
-# SWARMFOLIO_QBITTORRENT_API_KEY=qbt_replace-me
-```
+Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte. Do not place user-managed torrents in this category.
 
 M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
 
@@ -106,9 +102,9 @@ The timer is persistent and adds up to five minutes of jitter. Run `loginctl ena
 
 ## 🧠 Selection Policy
 
-Candidates must be recent, have enough freeleech time remaining, and pass the configured swarm thresholds. They are ranked deterministically by `(leechers + 1) / (seeders + 1)`. Eligible incumbents are ranked from lowest to highest lifetime upload throughput per stored byte. Spare capacity is filled first; otherwise the planner removes the weakest managed torrents needed to fit the best candidate while respecting action caps.
+Candidates must be recent, have enough freeleech time remaining, and pass the configured swarm thresholds. They are ranked deterministically by `(leechers + 1) / (seeders + 1)`. Eligible category torrents are ranked from lowest to highest lifetime upload throughput per stored byte. Spare capacity is filled first; otherwise the planner removes the weakest managed torrents needed to fit the best candidate while respecting action caps.
 
-The read-only `plan` command never requests a torrent download token and never mutates qBittorrent. `run --apply` downloads metainfo only for selected candidates, verifies its info hash, uploads it stopped, rechecks ownership and size, then performs the replacement.
+The read-only `plan` command never requests a torrent download token and never mutates qBittorrent. `run --apply` downloads metainfo only for selected candidates or interrupted-addition recovery, verifies exact info hashes, uploads additions stopped, rechecks category ownership and size, then performs the replacement.
 
 ## ⌨️ Development and Releases
 

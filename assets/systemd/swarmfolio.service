@@ -6,7 +6,6 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=-%E/swarmfolio/environment
 ExecStart=%h/.local/bin/swarmfolio run --apply
 TimeoutStartSec=30m
 

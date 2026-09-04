@@ -37,7 +37,7 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 			if cookie, err := request.Cookie("SID"); err != nil || cookie.Value != "session" {
 				t.Errorf("missing session cookie: %v", err)
 			}
-			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","auto_tmm":true,"tags":"mteam, freeleech"}]`)
+			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","auto_tmm":true}]`)
 		default:
 			t.Errorf("unexpected request %s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -45,7 +45,7 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL, "")
+	client := newTestClient(t, server.URL)
 	if err := client.Login(context.Background()); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -63,14 +63,25 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 	if !torrent.AddedOn.Equal(time.Unix(100, 0)) || !torrent.CompletionOn.Equal(time.Unix(200, 0)) || !torrent.LastActivity.Equal(time.Unix(300, 0)) {
 		t.Errorf("timestamps = %#v", torrent)
 	}
-	if got, want := strings.Join(torrent.Tags, ","), "mteam,freeleech"; got != want {
-		t.Errorf("tags = %q, want %q", got, want)
-	}
 	if torrent.Uploaded != 123 || torrent.AmountLeft != 456 {
 		t.Errorf("transfer amounts = uploaded %d, left %d", torrent.Uploaded, torrent.AmountLeft)
 	}
 	if !torrent.AutoTMM {
 		t.Error("AutoTMM = false, want true")
+	}
+}
+
+func TestNewRequiresCookieCredentials(t *testing.T) {
+	t.Parallel()
+	for name, config := range map[string]Config{
+		"username": {BaseURL: "https://qbittorrent.example", Password: "pass"},
+		"password": {BaseURL: "https://qbittorrent.example", Username: "user"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := New(config); err == nil {
+				t.Fatal("New succeeded without complete cookie credentials")
+			}
+		})
 	}
 }
 
@@ -92,7 +103,7 @@ func TestDefaultSavePathAndFreeSpace(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL, "key")
+	client := newTestClient(t, server.URL)
 	path, err := client.DefaultSavePath(context.Background())
 	if err != nil {
 		t.Fatalf("DefaultSavePath: %v", err)
@@ -134,7 +145,7 @@ func TestCategorySavePath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := newTestClient(t, server.URL, "key")
+			client := newTestClient(t, server.URL)
 			path, err := client.CategorySavePath(context.Background(), "freeleech")
 			if name == "success" {
 				if err != nil {
@@ -163,7 +174,7 @@ func TestFreeSpaceRejectsMissingAndNegativeValues(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := newTestClient(t, server.URL, "key")
+			client := newTestClient(t, server.URL)
 			if _, err := client.FreeSpace(context.Background()); err == nil {
 				t.Fatal("FreeSpace succeeded for invalid server state")
 			}
@@ -177,7 +188,7 @@ func TestPreallocateAllRejectsMissingValue(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL, "key")
+	client := newTestClient(t, server.URL)
 	if _, err := client.PreallocateAll(context.Background()); err == nil {
 		t.Fatal("PreallocateAll succeeded without preallocate_all")
 	}
@@ -208,7 +219,7 @@ func TestMutations(t *testing.T) {
 			}
 			requests["add"] = request.MultipartForm.Value
 			writer.WriteHeader(http.StatusAccepted)
-		case "/api/v2/torrents/delete", "/api/v2/torrents/addTags", "/api/v2/torrents/removeTags", "/api/v2/torrents/start":
+		case "/api/v2/torrents/delete", "/api/v2/torrents/start":
 			if err := request.ParseForm(); err != nil {
 				t.Fatal(err)
 			}
@@ -220,27 +231,18 @@ func TestMutations(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL, "key")
+	client := newTestClient(t, server.URL)
 	context := context.Background()
-	if err := client.Add(context, AddRequest{Metainfo: []byte("metainfo"), MetainfoName: "example.torrent", SavePath: "/data", Category: "freeleech", Tags: []string{"mteam", "freeleech"}, Stopped: true, AutoTMM: true}); err != nil {
+	if err := client.Add(context, AddRequest{Metainfo: []byte("metainfo"), MetainfoName: "example.torrent", SavePath: "/data", Category: "freeleech", Stopped: true, AutoTMM: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := client.Delete(context, []string{"a", "b"}, true); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if err := client.AddTags(context, []string{"a", "b"}, []string{"one", "two"}); err != nil {
-		t.Fatalf("AddTags: %v", err)
-	}
-	if err := client.RemoveTags(context, []string{"a"}, []string{"one"}); err != nil {
-		t.Fatalf("RemoveTags: %v", err)
-	}
 	if err := client.Start(context, []string{"a", "b"}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
-	if got, want := requests["add"].Get("tags"), "mteam,freeleech"; got != want {
-		t.Errorf("add tags = %q, want %q", got, want)
-	}
 	for _, key := range []string{"stopped", "paused"} {
 		if got := requests["add"].Get(key); got != "true" {
 			t.Errorf("add %s = %q, want true", key, got)
@@ -249,14 +251,14 @@ func TestMutations(t *testing.T) {
 	if got := requests["add"].Get("autoTMM"); got != "true" {
 		t.Errorf("add autoTMM = %q, want true", got)
 	}
+	if _, ok := requests["add"]["tags"]; ok {
+		t.Errorf("add request unexpectedly contains tags: %q", requests["add"]["tags"])
+	}
 	if got, want := requests["/api/v2/torrents/delete"].Get("hashes"), "a|b"; got != want {
 		t.Errorf("delete hashes = %q, want %q", got, want)
 	}
 	if got, want := requests["/api/v2/torrents/delete"].Get("deleteFiles"), "true"; got != want {
 		t.Errorf("deleteFiles = %q, want %q", got, want)
-	}
-	if got, want := requests["/api/v2/torrents/addTags"].Get("tags"), "one,two"; got != want {
-		t.Errorf("added tags = %q, want %q", got, want)
 	}
 }
 
@@ -271,7 +273,7 @@ func TestRejectsFailureResponses(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newTestClient(t, server.URL, "key")
+	client := newTestClient(t, server.URL)
 	if err := client.Start(context.Background(), []string{"a"}); err == nil || !strings.Contains(err.Error(), "Fails.") {
 		t.Fatalf("Start failure = %v", err)
 	}
@@ -282,7 +284,7 @@ func TestRejectsFailureResponses(t *testing.T) {
 
 func TestMutationsRejectBroadOrEmptyTargets(t *testing.T) {
 	t.Parallel()
-	client := newTestClient(t, "https://example.test", "key")
+	client := newTestClient(t, "https://example.test")
 	for _, hashes := range [][]string{nil, {}, {"all"}, {"safe", "bad|other"}} {
 		if err := client.Delete(context.Background(), hashes, true); err == nil {
 			t.Fatalf("Delete(%v) succeeded", hashes)
@@ -293,32 +295,9 @@ func TestMutationsRejectBroadOrEmptyTargets(t *testing.T) {
 	}
 }
 
-func TestAPIKeySkipsLoginAndAuthenticates(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		calls++
-		if got, want := request.Header.Get("Authorization"), "Bearer key"; got != want {
-			t.Errorf("Authorization = %q, want %q", got, want)
-		}
-		_, _ = io.WriteString(writer, "[]")
-	}))
-	defer server.Close()
-
-	client := newTestClient(t, server.URL, "key")
-	if err := client.Login(context.Background()); err != nil {
-		t.Fatalf("Login: %v", err)
-	}
-	if calls != 0 {
-		t.Fatalf("API-key Login made %d requests", calls)
-	}
-	if _, err := client.Torrents(context.Background()); err != nil {
-		t.Fatalf("Torrents: %v", err)
-	}
-}
-
-func newTestClient(t *testing.T, baseURL, apiKey string) *Client {
+func newTestClient(t *testing.T, baseURL string) *Client {
 	t.Helper()
-	client, err := New(Config{BaseURL: baseURL, Username: "user", Password: "pass", APIKey: apiKey})
+	client, err := New(Config{BaseURL: baseURL, Username: "user", Password: "pass"})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
