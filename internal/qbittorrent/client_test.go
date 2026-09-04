@@ -37,7 +37,7 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 			if cookie, err := request.Cookie("SID"); err != nil || cookie.Value != "session" {
 				t.Errorf("missing session cookie: %v", err)
 			}
-			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","tags":"mteam, freeleech"}]`)
+			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","auto_tmm":true,"tags":"mteam, freeleech"}]`)
 		default:
 			t.Errorf("unexpected request %s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -68,6 +68,9 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 	}
 	if torrent.Uploaded != 123 || torrent.AmountLeft != 456 {
 		t.Errorf("transfer amounts = uploaded %d, left %d", torrent.Uploaded, torrent.AmountLeft)
+	}
+	if !torrent.AutoTMM {
+		t.Error("AutoTMM = false, want true")
 	}
 }
 
@@ -110,6 +113,42 @@ func TestDefaultSavePathAndFreeSpace(t *testing.T) {
 	}
 	if !preallocate {
 		t.Fatal("PreallocateAll = false, want true")
+	}
+}
+
+func TestCategorySavePath(t *testing.T) {
+	for name, response := range map[string]string{
+		"success":               `{"freeleech":{"savePath":"/downloads/freeleech","download_path":false}}`,
+		"missing category":      `{}`,
+		"empty save path":       `{"freeleech":{"savePath":"","download_path":false}}`,
+		"missing download path": `{"freeleech":{"savePath":"/downloads/freeleech"}}`,
+		"inherited path":        `{"freeleech":{"savePath":"/downloads/freeleech","download_path":null}}`,
+		"enabled path":          `{"freeleech":{"savePath":"/downloads/freeleech","download_path":"/incomplete"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if got, want := request.URL.Path, "/api/v2/torrents/categories"; got != want {
+					t.Errorf("path = %q, want %q", got, want)
+				}
+				_, _ = io.WriteString(writer, response)
+			}))
+			defer server.Close()
+
+			client := newTestClient(t, server.URL, "key")
+			path, err := client.CategorySavePath(context.Background(), "freeleech")
+			if name == "success" {
+				if err != nil {
+					t.Fatalf("CategorySavePath: %v", err)
+				}
+				if got, want := path, "/downloads/freeleech"; got != want {
+					t.Errorf("path = %q, want %q", got, want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("CategorySavePath succeeded for an invalid category")
+			}
+		})
 	}
 }
 
@@ -183,7 +222,7 @@ func TestMutations(t *testing.T) {
 
 	client := newTestClient(t, server.URL, "key")
 	context := context.Background()
-	if err := client.Add(context, AddRequest{Metainfo: []byte("metainfo"), MetainfoName: "example.torrent", SavePath: "/data", Category: "freeleech", Tags: []string{"mteam", "freeleech"}, Stopped: true}); err != nil {
+	if err := client.Add(context, AddRequest{Metainfo: []byte("metainfo"), MetainfoName: "example.torrent", SavePath: "/data", Category: "freeleech", Tags: []string{"mteam", "freeleech"}, Stopped: true, AutoTMM: true}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := client.Delete(context, []string{"a", "b"}, true); err != nil {
@@ -206,6 +245,9 @@ func TestMutations(t *testing.T) {
 		if got := requests["add"].Get(key); got != "true" {
 			t.Errorf("add %s = %q, want true", key, got)
 		}
+	}
+	if got := requests["add"].Get("autoTMM"); got != "true" {
+		t.Errorf("add autoTMM = %q, want true", got)
 	}
 	if got, want := requests["/api/v2/torrents/delete"].Get("hashes"), "a|b"; got != want {
 		t.Errorf("delete hashes = %q, want %q", got, want)

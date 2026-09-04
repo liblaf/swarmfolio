@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -106,10 +107,33 @@ timeout = "1s"
 	if settings.QBittorrent.ManagedTag != "swarmfolio" || settings.QBittorrent.PendingTag != "swarmfolio-pending" {
 		t.Fatalf("ownership tags = %q, %q", settings.QBittorrent.ManagedTag, settings.QBittorrent.PendingTag)
 	}
+	if settings.QBittorrent.Category != "swarmfolio" {
+		t.Fatalf("category = %q, want %q", settings.QBittorrent.Category, "swarmfolio")
+	}
 	if settings.Portfolio.MinimumFreePercent != 25 {
 		t.Fatalf("minimum free percent = %v", settings.Portfolio.MinimumFreePercent)
 	}
 	if !slices.Equal(settings.QBittorrent.ProtectedTags, []string{"keep", "archive"}) {
 		t.Fatalf("protected tags = %v", settings.QBittorrent.ProtectedTags)
+	}
+}
+
+func TestParseRejectsInvalidCategory(t *testing.T) {
+	t.Parallel()
+	for _, category := range []string{"", " swarmfolio", "swarmfolio ", "swarmfolio\nother"} {
+		category := category
+		t.Run(category, func(t *testing.T) {
+			t.Parallel()
+			config := strings.Replace(Example, `category = "swarmfolio"`, `category = "`+category+`"`, 1)
+			_, err := Parse([]byte(config), func(key string) string {
+				return map[string]string{
+					"SWARMFOLIO_MTEAM_API_KEY":        "mteam-secret",
+					"SWARMFOLIO_QBITTORRENT_PASSWORD": "qbt-secret",
+				}[key]
+			})
+			if err == nil {
+				t.Fatal("Parse() accepted an invalid category")
+			}
+		})
 	}
 }

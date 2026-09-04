@@ -9,7 +9,7 @@ import (
 var testNow = time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
 func testConfig() Config {
-	return Config{BudgetBytes: 100, ReserveBytes: 10, ManagedTag: "swarmfolio", PendingTag: "swarmfolio-pending", CandidateMaxAge: 24 * time.Hour, MinFreeleechRemaining: time.Hour, MinLeechers: 1, MinOpportunityRatio: .5, MinResidency: time.Hour, MinIdle: time.Hour, ActiveUploadRate: 1, MaxAdditions: 2, MaxRemovals: 2}
+	return Config{BudgetBytes: 100, ReserveBytes: 10, ManagedTag: "swarmfolio", PendingTag: "swarmfolio-pending", Category: "swarmfolio", CandidateMaxAge: 24 * time.Hour, MinFreeleechRemaining: time.Hour, MinLeechers: 1, MinOpportunityRatio: .5, MinResidency: time.Hour, MinIdle: time.Hour, ActiveUploadRate: 1, MaxAdditions: 2, MaxRemovals: 2}
 }
 
 func candidate(id string, size int64, seeds, leeches int) Candidate {
@@ -17,7 +17,7 @@ func candidate(id string, size int64, seeds, leeches int) Candidate {
 }
 
 func torrent(hash string, size, uploaded int64) Torrent {
-	return Torrent{Hash: hash, Name: hash, Size: size, Uploaded: uploaded, Progress: 1, State: "pausedUP", AddedAt: testNow.Add(-2 * time.Hour), LastActivity: testNow.Add(-2 * time.Hour), Tags: "swarmfolio"}
+	return Torrent{Hash: hash, Name: hash, Size: size, Uploaded: uploaded, Progress: 1, State: "pausedUP", AddedAt: testNow.Add(-2 * time.Hour), LastActivity: testNow.Add(-2 * time.Hour), Tags: "swarmfolio", Category: "swarmfolio", AutoTMM: true}
 }
 
 func TestBuildFillsSpareBudgetInOpportunityOrder(t *testing.T) {
@@ -56,6 +56,22 @@ func TestBuildNeverRemovesProtectedPendingOrActive(t *testing.T) {
 	active := torrent("active", 40, 0)
 	active.UploadRate = 2
 	plan, err := Build(testNow, []Candidate{candidate("new", 30, 1, 8)}, []Torrent{protected, pending, active}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Additions) != 0 {
+		t.Fatalf("unsafe plan = %#v", plan)
+	}
+}
+
+func TestBuildNeverRemovesOutsideCategoryOrManualManagement(t *testing.T) {
+	cfg := testConfig()
+	wrongCategory := torrent("wrong-category", 40, 0)
+	wrongCategory.Category = "user-managed"
+	manual := torrent("manual", 40, 0)
+	manual.AutoTMM = false
+
+	plan, err := Build(testNow, []Candidate{candidate("new", 30, 1, 8)}, []Torrent{wrongCategory, manual}, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

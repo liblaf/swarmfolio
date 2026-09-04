@@ -19,7 +19,7 @@ import (
 
 const Version = 1
 
-const Example = `# Swarmfolio is stateless. qBittorrent tags are its only persistent state.
+const Example = `# Swarmfolio is stateless. qBittorrent is its only persistent state.
 version = 1
 
 [portfolio]
@@ -27,9 +27,9 @@ version = 1
 # impose an additional hard ceiling.
 budget = ""
 minimum_free_percent = 25
-# For a local qBittorrent, leave both empty and its default save path is probed.
+# For a local qBittorrent, leave both empty and the category save path is probed.
 # For a container, set disk_path to the host-visible path. For a remote server,
-# set disk_capacity and qBittorrent's reported free space is used.
+# set disk_capacity; its category and default save paths must be identical.
 disk_path = ""
 disk_capacity = ""
 
@@ -49,8 +49,10 @@ api_key = ""
 managed_tag = "swarmfolio"
 pending_tag = "swarmfolio-pending"
 protected_tags = ["keep", "archive"]
-category = ""
-save_path = ""
+# Existing qBittorrent category that exclusively owns Swarmfolio torrents.
+# Configure its save path and disable its separate incomplete-download path;
+# Swarmfolio enables Automatic Torrent Management.
+category = "swarmfolio"
 
 [policy]
 candidate_max_age = "72h"
@@ -100,8 +102,7 @@ type fileQBittorrent struct {
 	ManagedTag    string   `toml:"managed_tag"`
 	PendingTag    string   `toml:"pending_tag"`
 	ProtectedTags []string `toml:"protected_tags"`
-	Category      string   `toml:"category"`
-	SavePath      string   `toml:"save_path"`
+	Category      *string  `toml:"category"`
 }
 
 type filePolicy struct {
@@ -154,7 +155,6 @@ type QBittorrent struct {
 	PendingTag    string
 	ProtectedTags []string
 	Category      string
-	SavePath      string
 }
 
 type Policy struct {
@@ -254,6 +254,10 @@ func Parse(data []byte, getenv func(string) string) (Settings, error) {
 	qbtAPIKey := firstNonempty(getenv("SWARMFOLIO_QBITTORRENT_API_KEY"), raw.QBittorrent.APIKey)
 	managedTag := firstNonempty(raw.QBittorrent.ManagedTag, "swarmfolio")
 	pendingTag := firstNonempty(raw.QBittorrent.PendingTag, managedTag+"-pending")
+	category := "swarmfolio"
+	if raw.QBittorrent.Category != nil {
+		category = *raw.QBittorrent.Category
+	}
 	protectedTags := raw.QBittorrent.ProtectedTags
 	if protectedTags == nil {
 		protectedTags = []string{"keep", "archive"}
@@ -273,7 +277,7 @@ func Parse(data []byte, getenv func(string) string) (Settings, error) {
 			Username: raw.QBittorrent.Username, Password: qbtPassword, APIKey: qbtAPIKey,
 			ManagedTag: managedTag, PendingTag: pendingTag,
 			ProtectedTags: slices.Clone(protectedTags),
-			Category:      raw.QBittorrent.Category, SavePath: raw.QBittorrent.SavePath,
+			Category:      category,
 		},
 		Policy: Policy{
 			CandidateMaxAge: candidateMaxAge, MinimumFreeleechRemaining: freeRemaining,
@@ -325,8 +329,9 @@ func (settings Settings) validate() error {
 	if settings.QBittorrent.ManagedTag == "" || settings.QBittorrent.PendingTag == "" {
 		return errors.New("qbittorrent managed_tag and pending_tag are required")
 	}
-	if settings.QBittorrent.SavePath != "" && !filepath.IsAbs(settings.QBittorrent.SavePath) {
-		return errors.New("qbittorrent.save_path must be absolute")
+	if settings.QBittorrent.Category == "" || strings.TrimSpace(settings.QBittorrent.Category) != settings.QBittorrent.Category ||
+		strings.ContainsAny(settings.QBittorrent.Category, "\r\n\x00") {
+		return errors.New("qbittorrent.category must be nonempty, trimmed, and contain no line breaks")
 	}
 	for name, tag := range map[string]string{
 		"qbittorrent.managed_tag": settings.QBittorrent.ManagedTag,

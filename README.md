@@ -18,7 +18,7 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 ## ✨ Safety Model
 
 - qBittorrent is the only persistent source of truth. Swarmfolio has no database or cache.
-- The default ownership tag is `swarmfolio`. Untagged torrents are never deleted.
+- The default ownership tag and category are both `swarmfolio`. A torrent must have that tag, belong to that category, and use Automatic Torrent Management before it can be deleted.
 - `keep` and `archive` are protected by default; configured protected tags always win.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
 - New torrents are added stopped with a `swarmfolio-pending` tag before any old data is removed. An interrupted run is recovered from those qBittorrent tags on the next applied run.
@@ -55,11 +55,14 @@ ${EDITOR:-vi} "$(swarmfolio config path)"
 The generated file documents every setting. Its important defaults are:
 
 - `qbittorrent.managed_tag = "swarmfolio"`;
+- `qbittorrent.category = "swarmfolio"`;
 - no hard byte ceiling unless `portfolio.budget` is set;
 - at least `portfolio.minimum_free_percent = 25` of the download disk remains free;
 - at most two additions and four removals per hourly run.
 
-The disk limit accounts for both current free space and every unfinished byte already promised to qBittorrent. For local qBittorrent, Swarmfolio probes its default save path. Set `portfolio.disk_path` to the host-visible mount for a container. For a remote host, set `portfolio.disk_capacity`; qBittorrent then supplies current free space. A custom `qbittorrent.save_path` requires a host-visible `portfolio.disk_path`.
+The disk limit accounts for both current free space and every unfinished byte already promised to qBittorrent. For local qBittorrent, Swarmfolio probes the configured category's save path. Set `portfolio.disk_path` to the host-visible mount for a container. For a remote host, `portfolio.disk_capacity` can use qBittorrent's reported free space only when the category and default save paths are identical; otherwise run Swarmfolio where it can probe the category filesystem.
+
+Swarmfolio manages torrents only in its required `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte.
 
 Keep credentials in the mode-`0600` config or in `${XDG_CONFIG_HOME:-$HOME/.config}/swarmfolio/environment`:
 

@@ -33,6 +33,8 @@ type Torrent struct {
 	AddedAt      time.Time
 	LastActivity time.Time
 	Tags         string
+	Category     string
+	AutoTMM      bool
 	CandidateID  string
 }
 
@@ -42,6 +44,7 @@ type Config struct {
 	ReserveBytes          int64
 	ManagedTag            string
 	PendingTag            string
+	Category              string
 	ProtectedTags         []string
 	CandidateMaxAge       time.Duration
 	MinFreeleechRemaining time.Duration
@@ -163,8 +166,8 @@ func validateConfig(c Config) error {
 	if c.BudgetBytes <= 0 || c.ReserveBytes < 0 || c.ReserveBytes >= c.BudgetBytes {
 		return errors.New("optimizer: budget must exceed a non-negative reserve")
 	}
-	if strings.TrimSpace(c.ManagedTag) == "" || strings.TrimSpace(c.PendingTag) == "" {
-		return errors.New("optimizer: managed and pending tags must be set")
+	if strings.TrimSpace(c.ManagedTag) == "" || strings.TrimSpace(c.PendingTag) == "" || strings.TrimSpace(c.Category) == "" {
+		return errors.New("optimizer: managed and pending tags and category must be set")
 	}
 	if c.CandidateMaxAge < 0 || c.MinFreeleechRemaining < 0 || c.MinResidency < 0 || c.MinIdle < 0 {
 		return errors.New("optimizer: durations must not be negative")
@@ -230,7 +233,7 @@ func removable(now time.Time, torrents []Torrent, cfg Config) []Torrent {
 	var out []Torrent
 	for _, t := range torrents {
 		tags := tagSet(t.Tags)
-		if !tags[cfg.ManagedTag] || tags[cfg.PendingTag] || t.Progress != 1 || isProtected(tags, protected) {
+		if t.Category != cfg.Category || !t.AutoTMM || !tags[cfg.ManagedTag] || tags[cfg.PendingTag] || t.Progress != 1 || isProtected(tags, protected) {
 			continue
 		}
 		if now.Sub(t.AddedAt) < cfg.MinResidency || now.Sub(t.LastActivity) < cfg.MinIdle || t.UploadRate > cfg.ActiveUploadRate || busyState(t.State) {

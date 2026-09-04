@@ -59,6 +59,7 @@ type Torrent struct {
 	UPRate       int64
 	SavePath     string
 	Category     string
+	AutoTMM      bool
 	Tags         []string
 }
 
@@ -70,6 +71,7 @@ type AddRequest struct {
 	Category     string
 	Tags         []string
 	Stopped      bool
+	AutoTMM      bool
 }
 
 // New constructs a client. API-key authentication takes precedence over the
@@ -166,6 +168,43 @@ func (c *Client) DefaultSavePath(ctx context.Context) (string, error) {
 	return path, nil
 }
 
+// CategorySavePath returns the final save path configured for category. The
+// category must exist, explicitly provide a nonempty savePath, and explicitly
+// disable its separate incomplete-download path so one filesystem budget covers
+// every byte qBittorrent writes for the category.
+func (c *Client) CategorySavePath(ctx context.Context, category string) (string, error) {
+	if category == "" {
+		return "", errors.New("qBittorrent category is required")
+	}
+	response, err := c.request(ctx, http.MethodGet, "torrents/categories", nil, "", nil)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if err := requireSuccess(response); err != nil {
+		return "", err
+	}
+
+	var categories map[string]struct {
+		SavePath     *string         `json:"savePath"`
+		DownloadPath json.RawMessage `json:"download_path"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&categories); err != nil {
+		return "", fmt.Errorf("decode categories response: %w", err)
+	}
+	configured, ok := categories[category]
+	if !ok {
+		return "", fmt.Errorf("qBittorrent category %q does not exist", category)
+	}
+	if configured.SavePath == nil || strings.TrimSpace(*configured.SavePath) == "" {
+		return "", fmt.Errorf("qBittorrent category %q has no savePath", category)
+	}
+	if !bytes.Equal(bytes.TrimSpace(configured.DownloadPath), []byte("false")) {
+		return "", fmt.Errorf("qBittorrent category %q must explicitly disable its separate incomplete-download path", category)
+	}
+	return *configured.SavePath, nil
+}
+
 // FreeSpace returns free bytes on qBittorrent's download filesystem.
 func (c *Client) FreeSpace(ctx context.Context) (int64, error) {
 	response, err := c.request(ctx, http.MethodGet, "sync/maindata", nil, "", url.Values{"rid": {"0"}})
@@ -242,6 +281,7 @@ func (c *Client) Add(ctx context.Context, request AddRequest) error {
 		"tags":     strings.Join(request.Tags, ","),
 		"stopped":  strconv.FormatBool(request.Stopped),
 		"paused":   strconv.FormatBool(request.Stopped),
+		"autoTMM":  strconv.FormatBool(request.AutoTMM),
 	} {
 		if err := writer.WriteField(key, value); err != nil {
 			return fmt.Errorf("write %s form field: %w", key, err)
@@ -386,6 +426,7 @@ type torrentResponse struct {
 	UPRate       int64   `json:"upspeed"`
 	SavePath     string  `json:"save_path"`
 	Category     string  `json:"category"`
+	AutoTMM      bool    `json:"auto_tmm"`
 	Tags         string  `json:"tags"`
 }
 
@@ -408,6 +449,7 @@ func (response torrentResponse) torrent() Torrent {
 		UPRate:       response.UPRate,
 		SavePath:     response.SavePath,
 		Category:     response.Category,
+		AutoTMM:      response.AutoTMM,
 		Tags:         splitTags(response.Tags),
 	}
 }

@@ -29,6 +29,7 @@ const (
 type QBittorrent interface {
 	Login(context.Context) error
 	Torrents(context.Context) ([]qbittorrent.Torrent, error)
+	CategorySavePath(context.Context, string) (string, error)
 	DefaultSavePath(context.Context) (string, error)
 	FreeSpace(context.Context) (int64, error)
 	PreallocateAll(context.Context) (bool, error)
@@ -199,19 +200,19 @@ func (r Runner) snapshot(ctx context.Context) (snapshot, error) {
 	if err != nil {
 		return snapshot{}, fmt.Errorf("list qBittorrent torrents: %w", err)
 	}
-	targetPath := r.Config.QBittorrent.SavePath
+	targetPath, err := r.QBittorrent.CategorySavePath(ctx, r.Config.QBittorrent.Category)
+	if err != nil {
+		return snapshot{}, fmt.Errorf("resolve qBittorrent category %q save path: %w", r.Config.QBittorrent.Category, err)
+	}
+	if !filepath.IsAbs(targetPath) {
+		return snapshot{}, fmt.Errorf("qBittorrent category %q save path must be absolute, got %q", r.Config.QBittorrent.Category, targetPath)
+	}
 	defaultPath := ""
-	if targetPath == "" || r.Config.Portfolio.DiskCapacityBytes > 0 {
+	if r.Config.Portfolio.DiskCapacityBytes > 0 {
 		defaultPath, err = r.QBittorrent.DefaultSavePath(ctx)
 		if err != nil {
 			return snapshot{}, fmt.Errorf("read qBittorrent default save path: %w", err)
 		}
-		if targetPath == "" {
-			targetPath = defaultPath
-		}
-	}
-	if !filepath.IsAbs(targetPath) {
-		return snapshot{}, fmt.Errorf("qBittorrent download path must be absolute, got %q", targetPath)
 	}
 
 	used, outstanding, err := r.account(torrents, targetPath)
@@ -221,7 +222,7 @@ func (r Runner) snapshot(ctx context.Context) (snapshot, error) {
 	var space disk.Space
 	if r.Config.Portfolio.DiskCapacityBytes > 0 {
 		if filepath.Clean(targetPath) != filepath.Clean(defaultPath) {
-			return snapshot{}, errors.New("portfolio.disk_capacity can only use qBittorrent's default save path; configure portfolio.disk_path for a custom save path")
+			return snapshot{}, errors.New("portfolio.disk_capacity requires the qBittorrent category and default save paths to match; use local portfolio.disk_path probing for another filesystem")
 		}
 		free, err := r.QBittorrent.FreeSpace(ctx)
 		if err != nil {
@@ -301,6 +302,7 @@ func (r Runner) optimizerTorrents(torrents []qbittorrent.Torrent, targetPath str
 			Uploaded: torrent.Uploaded, UploadRate: torrent.UPRate, Progress: torrent.Progress,
 			State: torrent.State, AddedAt: torrent.AddedOn, LastActivity: lastActivity,
 			Tags: strings.Join(tags, ","), CandidateID: candidateID,
+			Category: torrent.Category, AutoTMM: torrent.AutoTMM,
 		})
 	}
 	return out, nil
@@ -310,6 +312,7 @@ func (r Runner) optimizerConfig(limit int64) optimizer.Config {
 	return optimizer.Config{
 		BudgetBytes: limit, ReserveBytes: 0,
 		ManagedTag: r.Config.QBittorrent.ManagedTag, PendingTag: r.Config.QBittorrent.PendingTag,
+		Category:              r.Config.QBittorrent.Category,
 		ProtectedTags:         slices.Clone(r.Config.QBittorrent.ProtectedTags),
 		CandidateMaxAge:       r.Config.Policy.CandidateMaxAge,
 		MinFreeleechRemaining: r.Config.Policy.MinimumFreeleechRemaining,
@@ -336,9 +339,6 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 		if !has(torrent.Tags, r.Config.QBittorrent.ManagedTag) {
 			return nil, false, fmt.Errorf("torrent %q has reserved pending tag without managed tag", torrent.Hash)
 		}
-		if !within(state.targetPath, torrent.SavePath) {
-			return nil, false, fmt.Errorf("pending torrent %q is outside the configured download path", torrent.Hash)
-		}
 		pending = append(pending, torrent)
 	}
 	if len(pending) == 0 {
@@ -355,6 +355,14 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 		id, err := candidateID(torrent.Tags, r.Config.QBittorrent.ManagedTag)
 		if err != nil {
 			return recoveries, false, fmt.Errorf("pending torrent %q: %w", torrent.Hash, err)
+		}
+		if torrent.Category != r.Config.QBittorrent.Category || !torrent.AutoTMM || !within(state.targetPath, torrent.SavePath) {
+			if torrent.Progress > 0 || torrent.AmountLeft != torrent.Size {
+				return recoveries, false, fmt.Errorf("pending torrent %q is outside the automatically managed category and contains downloaded data", torrent.Hash)
+			}
+			stale = append(stale, torrent.Hash)
+			recoveries = append(recoveries, Recovery{Action: "remove", Hash: torrent.Hash, Name: torrent.Name})
+			continue
 		}
 		if _, ok := eligible[id]; ok {
 			valid = append(valid, torrent)
@@ -474,7 +482,7 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition) 
 		Metainfo: metainfoBytes, MetainfoName: candidate.ID + ".torrent",
 		SavePath: beforeAdd.targetPath, Category: r.Config.QBittorrent.Category,
 		Tags:    []string{r.Config.QBittorrent.ManagedTag, r.Config.QBittorrent.PendingTag, idTag},
-		Stopped: true,
+		Stopped: true, AutoTMM: true,
 	}); err != nil {
 		return fmt.Errorf("add M-Team torrent %s to qBittorrent: %w", candidate.ID, err)
 	}
@@ -488,9 +496,10 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition) 
 	if err != nil {
 		return rollback(fmt.Errorf("verify added M-Team torrent %s: %w", candidate.ID, err))
 	}
-	if added.Size != candidate.Size || added.Progress != 0 || !has(added.Tags, r.Config.QBittorrent.ManagedTag) ||
+	if added.Size != candidate.Size || added.Progress != 0 || added.Category != r.Config.QBittorrent.Category || !added.AutoTMM ||
+		!has(added.Tags, r.Config.QBittorrent.ManagedTag) ||
 		!has(added.Tags, r.Config.QBittorrent.PendingTag) || !has(added.Tags, idTag) || !within(beforeAdd.targetPath, added.SavePath) {
-		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, tagged plan", candidate.ID))
+		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, tagged, automatically managed plan", candidate.ID))
 	}
 	afterAdd, err := r.snapshot(ctx)
 	if err != nil {
@@ -576,7 +585,8 @@ func (r Runner) verifyRemovals(removals []optimizer.Removal, current []qbittorre
 		if torrent == nil {
 			return fmt.Errorf("planned removal %s disappeared from qBittorrent", removal.Hash)
 		}
-		if torrent.Size != removal.Size || torrent.Progress != 1 || !has(torrent.Tags, r.Config.QBittorrent.ManagedTag) ||
+		if torrent.Size != removal.Size || torrent.Progress != 1 || torrent.Category != r.Config.QBittorrent.Category || !torrent.AutoTMM ||
+			!has(torrent.Tags, r.Config.QBittorrent.ManagedTag) ||
 			hasAny(torrent.Tags, r.Config.QBittorrent.ProtectedTags) || has(torrent.Tags, r.Config.QBittorrent.PendingTag) ||
 			torrent.UPRate > r.Config.Policy.ActiveUploadRate || now.Sub(torrent.AddedOn) < r.Config.Policy.MinimumResidency ||
 			(!torrent.LastActivity.IsZero() && now.Sub(torrent.LastActivity) < r.Config.Policy.MinimumIdle) || busyState(torrent.State) {
