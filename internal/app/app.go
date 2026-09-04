@@ -27,7 +27,6 @@ const (
 )
 
 type QBittorrent interface {
-	Login(context.Context) error
 	Torrents(context.Context) ([]qbittorrent.Torrent, error)
 	CategorySavePath(context.Context, string) (string, error)
 	DefaultSavePath(context.Context) (string, error)
@@ -122,10 +121,6 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	if apply {
 		report.Mode = "apply"
 	}
-	if err := r.QBittorrent.Login(ctx); err != nil {
-		return report, fmt.Errorf("authenticate to qBittorrent: %w", err)
-	}
-
 	state, err := r.snapshot(ctx)
 	if err != nil {
 		return report, err

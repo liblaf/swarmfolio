@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-func TestCookieLoginAndTorrents(t *testing.T) {
-	t.Helper()
+const testAPIKey = "qbt_0123456789abcdefghijklmnopqr"
+
+func TestAPIKeyTorrents(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if got, want := request.Header.Get("Origin"), serverOrigin(request); got != want {
 			t.Errorf("Origin = %q, want %q", got, want)
@@ -20,23 +21,11 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 		if got, want := request.Header.Get("Referer"), serverOrigin(request)+"/"; got != want {
 			t.Errorf("Referer = %q, want %q", got, want)
 		}
+		if got, want := request.Header.Get("Authorization"), "Bearer "+testAPIKey; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
 		switch request.URL.Path {
-		case "/api/v2/auth/login":
-			if err := request.ParseForm(); err != nil {
-				t.Fatal(err)
-			}
-			if got := request.Form.Get("username"); got != "user" {
-				t.Errorf("username = %q", got)
-			}
-			if got := request.Form.Get("password"); got != "pass" {
-				t.Errorf("password = %q", got)
-			}
-			http.SetCookie(writer, &http.Cookie{Name: "SID", Value: "session", Path: "/"})
-			_, _ = io.WriteString(writer, "Ok.")
 		case "/api/v2/torrents/info":
-			if cookie, err := request.Cookie("SID"); err != nil || cookie.Value != "session" {
-				t.Errorf("missing session cookie: %v", err)
-			}
 			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","auto_tmm":true}]`)
 		default:
 			t.Errorf("unexpected request %s", request.URL.Path)
@@ -46,9 +35,6 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	if err := client.Login(context.Background()); err != nil {
-		t.Fatalf("Login: %v", err)
-	}
 	torrents, err := client.Torrents(context.Background())
 	if err != nil {
 		t.Fatalf("Torrents: %v", err)
@@ -71,17 +57,10 @@ func TestCookieLoginAndTorrents(t *testing.T) {
 	}
 }
 
-func TestNewRequiresCookieCredentials(t *testing.T) {
+func TestNewRequiresAPIKey(t *testing.T) {
 	t.Parallel()
-	for name, config := range map[string]Config{
-		"username": {BaseURL: "https://qbittorrent.example", Password: "pass"},
-		"password": {BaseURL: "https://qbittorrent.example", Username: "user"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := New(config); err == nil {
-				t.Fatal("New succeeded without complete cookie credentials")
-			}
-		})
+	if _, err := New(Config{BaseURL: "https://qbittorrent.example"}); err == nil {
+		t.Fatal("New succeeded without an API key")
 	}
 }
 
@@ -197,6 +176,9 @@ func TestPreallocateAllRejectsMissingValue(t *testing.T) {
 func TestMutations(t *testing.T) {
 	requests := make(map[string]url.Values)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if got, want := request.Header.Get("Authorization"), "Bearer "+testAPIKey; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
 		switch request.URL.Path {
 		case "/api/v2/torrents/add":
 			if err := request.ParseMultipartForm(1 << 20); err != nil {
@@ -297,7 +279,7 @@ func TestMutationsRejectBroadOrEmptyTargets(t *testing.T) {
 
 func newTestClient(t *testing.T, baseURL string) *Client {
 	t.Helper()
-	client, err := New(Config{BaseURL: baseURL, Username: "user", Password: "pass"})
+	client, err := New(Config{BaseURL: baseURL, APIKey: testAPIKey})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

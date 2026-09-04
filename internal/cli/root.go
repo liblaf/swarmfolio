@@ -91,8 +91,8 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 	}
 	httpClient := &http.Client{Timeout: settings.HTTPTimeout}
 	qbt, err := qbittorrent.New(qbittorrent.Config{
-		BaseURL: settings.QBittorrent.BaseURL, Username: settings.QBittorrent.Username,
-		Password: settings.QBittorrent.Password, HTTPClient: httpClient,
+		BaseURL: settings.QBittorrent.BaseURL, APIKey: settings.QBittorrent.APIKey,
+		HTTPClient: httpClient,
 	})
 	if err != nil {
 		return err

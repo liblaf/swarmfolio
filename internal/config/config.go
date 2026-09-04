@@ -27,8 +27,7 @@ api_key = ""
 
 [qbittorrent]
 base_url = "http://127.0.0.1:8080"
-username = "admin"
-password = ""
+api_key = ""
 `
 
 type fileConfig struct {
@@ -58,8 +57,7 @@ type fileMTeam struct {
 
 type fileQBittorrent struct {
 	BaseURL  string  `toml:"base_url"`
-	Username string  `toml:"username"`
-	Password string  `toml:"password"`
+	APIKey   string  `toml:"api_key"`
 	Category *string `toml:"category"`
 }
 
@@ -106,8 +104,7 @@ type MTeam struct {
 
 type QBittorrent struct {
 	BaseURL  string
-	Username string
-	Password string
+	APIKey   string
 	Category string
 }
 
@@ -238,7 +235,8 @@ func Parse(data []byte) (Settings, error) {
 		},
 		QBittorrent: QBittorrent{
 			BaseURL:  strings.TrimRight(raw.QBittorrent.BaseURL, "/"),
-			Username: raw.QBittorrent.Username, Password: raw.QBittorrent.Password, Category: category,
+			APIKey:   raw.QBittorrent.APIKey,
+			Category: category,
 		},
 		Policy: Policy{
 			CandidateMaxAge: candidateMaxAge, MinimumFreeleechRemaining: freeRemaining,
@@ -284,8 +282,8 @@ func (settings Settings) validate() error {
 	if err := validateURL("qbittorrent.base_url", settings.QBittorrent.BaseURL); err != nil {
 		return err
 	}
-	if settings.QBittorrent.Username == "" || settings.QBittorrent.Password == "" {
-		return errors.New("qbittorrent.username and qbittorrent.password are required")
+	if settings.QBittorrent.APIKey == "" {
+		return errors.New("qbittorrent.api_key is required")
 	}
 	if settings.QBittorrent.Category == "" || strings.TrimSpace(settings.QBittorrent.Category) != settings.QBittorrent.Category ||
 		strings.ContainsAny(settings.QBittorrent.Category, "\r\n\x00") {

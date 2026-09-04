@@ -40,7 +40,7 @@ Alternatively, build it with Go 1.25 or newer:
 go install github.com/liblaf/swarmfolio/cmd/swarmfolio@latest
 ```
 
-Swarmfolio targets qBittorrent 5.0 or newer and uses WebUI username/password login.
+Swarmfolio targets qBittorrent 5.2 or newer and authenticates WebUI requests with a Bearer API key.
 
 ## ⚙️ Configuration
 
@@ -51,7 +51,7 @@ swarmfolio config init
 ${EDITOR:-vi} "$(swarmfolio config path)"
 ```
 
-The generated mode-`0600` file contains only the four required values:
+The generated mode-`0600` file contains only the three required values:
 
 ```toml
 [mteam]
@@ -59,8 +59,7 @@ api_key = "replace-me"
 
 [qbittorrent]
 base_url = "http://127.0.0.1:8080"
-username = "admin"
-password = "replace-me"
+api_key = "replace-me"
 ```
 
 Everything else has an application default: category `swarmfolio`, no hard byte ceiling, at least 25% of the download disk free, and at most two additions and four removals per hourly run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected.
@@ -69,7 +68,7 @@ The disk limit accounts for both current free space and every unfinished byte al
 
 Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte. Do not place user-managed torrents in this category.
 
-M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
+In qBittorrent 5.2 or newer, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api_key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
 
 Test the complete read-only path before enabling mutations:
 

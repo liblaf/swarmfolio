@@ -435,7 +435,6 @@ type fakeQBT struct {
 	mutations    int
 }
 
-func (q *fakeQBT) Login(context.Context) error { q.events = append(q.events, "login"); return nil }
 func (q *fakeQBT) Torrents(context.Context) ([]qbittorrent.Torrent, error) {
 	q.events = append(q.events, "torrents")
 	return slices.Clone(q.torrents), nil

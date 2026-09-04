@@ -11,7 +11,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"path"
 	"strconv"
@@ -23,18 +22,16 @@ import (
 // web UI URL; an optional /api/v2 suffix is accepted.
 type Config struct {
 	BaseURL    string
-	Username   string
-	Password   string
+	APIKey     string
 	HTTPClient *http.Client
 }
 
 // Client is a qBittorrent Web API client.
 type Client struct {
-	baseURL  *url.URL
-	origin   string
-	username string
-	password string
-	http     *http.Client
+	baseURL *url.URL
+	origin  string
+	apiKey  string
+	http    *http.Client
 }
 
 // Torrent is the portion of qBittorrent's torrent-info response relevant to
@@ -70,13 +67,13 @@ type AddRequest struct {
 	AutoTMM      bool
 }
 
-// New constructs a client using qBittorrent's cookie-based login flow.
+// New constructs a client using qBittorrent's stateless API-key flow.
 func New(config Config) (*Client, error) {
 	if config.BaseURL == "" {
 		return nil, errors.New("qBittorrent base URL is required")
 	}
-	if config.Username == "" || config.Password == "" {
-		return nil, errors.New("qBittorrent username and password are required")
+	if config.APIKey == "" {
+		return nil, errors.New("qBittorrent API key is required")
 	}
 	u, err := url.Parse(config.BaseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -91,29 +88,13 @@ func New(config Config) (*Client, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	if client.Jar == nil {
-		jar, err := cookiejar.New(nil)
-		if err != nil {
-			return nil, fmt.Errorf("create cookie jar: %w", err)
-		}
-		copy := *client
-		copy.Jar = jar
-		client = &copy
-	}
 
 	return &Client{
-		baseURL:  u,
-		origin:   (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(),
-		username: config.Username,
-		password: config.Password,
-		http:     client,
+		baseURL: u,
+		origin:  (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(),
+		apiKey:  config.APIKey,
+		http:    client,
 	}, nil
-}
-
-// Login establishes a qBittorrent session.
-func (c *Client) Login(ctx context.Context) error {
-	form := url.Values{"username": {c.username}, "password": {c.password}}
-	return c.login(ctx, form)
 }
 
 // Torrents lists torrents known to qBittorrent.
@@ -303,10 +284,6 @@ func (c *Client) Start(ctx context.Context, hashes []string) error {
 	return c.formMutate(ctx, "torrents/start", url.Values{"hashes": {strings.Join(hashes, "|")}})
 }
 
-func (c *Client) login(ctx context.Context, form url.Values) error {
-	return c.formMutate(ctx, "auth/login", form)
-}
-
 func validateHashes(hashes []string) error {
 	if len(hashes) == 0 {
 		return errors.New("qBittorrent mutation requires at least one torrent hash")
@@ -342,6 +319,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body io.R
 	}
 	request.Header.Set("Origin", c.origin)
 	request.Header.Set("Referer", c.origin+"/")
+	request.Header.Set("Authorization", "Bearer "+c.apiKey)
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}

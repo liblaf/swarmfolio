@@ -23,7 +23,9 @@ func TestLoadRequiresPrivateRegularConfig(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.toml")
-	if err := os.WriteFile(valid, []byte(strings.ReplaceAll(strings.ReplaceAll(Example, `api_key = ""`, `api_key = "mteam-secret"`), `password = ""`, `password = "qbt-secret"`)), 0o600); err != nil {
+	validConfig := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
+	validConfig = strings.Replace(validConfig, `api_key = ""`, `api_key = "qbt-secret"`, 1)
+	if err := os.WriteFile(valid, []byte(validConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(valid); err != nil {
@@ -51,8 +53,7 @@ func TestParseRejectsExplicitEmptyOptionalString(t *testing.T) {
 api_key = "mteam-secret"
 [qbittorrent]
 base_url = "http://localhost:8080"
-username = "user"
-password = "qbt-secret"
+api_key = "qbt-secret"
 `
 	for _, setting := range []string{
 		"[mteam]\nmode = \"\"\n",
@@ -108,9 +109,20 @@ func TestParseRejectsUnknownAndMissingCredentials(t *testing.T) {
 	}
 }
 
+func TestParseRejectsLegacyQBittorrentCredentials(t *testing.T) {
+	t.Parallel()
+	for _, field := range []string{`username = "admin"`, `password = "secret"`} {
+		config := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
+		config = strings.Replace(config, `api_key = ""`, `api_key = "qbt-secret"`+"\n"+field, 1)
+		if _, err := Parse([]byte(config)); err == nil {
+			t.Fatalf("Parse() accepted legacy qBittorrent field %q", field)
+		}
+	}
+}
+
 func TestEnvironmentCannotReplaceConfigCredentials(t *testing.T) {
 	t.Setenv("SWARMFOLIO_MTEAM_API_KEY", "legacy-mteam-secret")
-	t.Setenv("SWARMFOLIO_QBITTORRENT_PASSWORD", "legacy-qbt-secret")
+	t.Setenv("SWARMFOLIO_QBITTORRENT_API_KEY", "legacy-qbt-secret")
 	if _, err := Parse([]byte(Example)); err == nil {
 		t.Fatal("Parse() accepted credentials from the environment")
 	}
@@ -118,13 +130,13 @@ func TestEnvironmentCannotReplaceConfigCredentials(t *testing.T) {
 
 func TestParseRequiresCredentialsInTOML(t *testing.T) {
 	t.Parallel()
-	minimal := strings.ReplaceAll(Example, `api_key = ""`, `api_key = "mteam-secret"`)
-	minimal = strings.ReplaceAll(minimal, `password = ""`, `password = "qbt-secret"`)
+	minimal := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
+	minimal = strings.Replace(minimal, `api_key = ""`, `api_key = "qbt-secret"`, 1)
 	settings, err := Parse([]byte(minimal))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.MTeam.APIKey != "mteam-secret" || settings.QBittorrent.Password != "qbt-secret" {
+	if settings.MTeam.APIKey != "mteam-secret" || settings.QBittorrent.APIKey != "qbt-secret" {
 		t.Fatal("Parse() did not retain TOML credentials")
 	}
 	if strings.Contains(Example, "version =") || strings.Contains(Example, "[policy]") || strings.Contains(Example, "[portfolio]") || strings.Contains(Example, "[http]") {
@@ -137,7 +149,7 @@ func TestParseRequiresCredentialsInTOML(t *testing.T) {
 			assignments = append(assignments, line)
 		}
 	}
-	want := []string{`api_key = ""`, `base_url = "http://127.0.0.1:8080"`, `username = "admin"`, `password = ""`}
+	want := []string{`api_key = ""`, `base_url = "http://127.0.0.1:8080"`, `api_key = ""`}
 	if strings.Join(assignments, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("Example assignments = %q, want exactly %q", assignments, want)
 	}
@@ -150,8 +162,7 @@ func TestParseAppliesDocumentedDefaults(t *testing.T) {
 api_key = "mteam-secret"
 [qbittorrent]
 base_url = "http://localhost:8080"
-username = "user"
-password = "qbt-secret"
+api_key = "qbt-secret"
 `
 	settings, err := Parse([]byte(minimal))
 	if err != nil {
@@ -180,8 +191,7 @@ func TestParseVersionIsOptionalButValidatedWhenPresent(t *testing.T) {
 api_key = "mteam-secret"
 [qbittorrent]
 base_url = "http://localhost:8080"
-username = "user"
-password = "qbt-secret"
+api_key = "qbt-secret"
 `
 	if _, err := Parse([]byte(config)); err != nil {
 		t.Fatalf("Parse() without version: %v", err)
@@ -205,8 +215,7 @@ func TestParseRejectsInvalidCategory(t *testing.T) {
 api_key = "mteam-secret"
 [qbittorrent]
 base_url = "http://localhost:8080"
-username = "user"
-password = "qbt-secret"
+api_key = "qbt-secret"
 category = "` + category + `"
 `
 			_, err := Parse([]byte(config))
