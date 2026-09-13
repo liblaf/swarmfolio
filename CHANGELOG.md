@@ -7,7 +7,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.0) - 2026-09-04
+## [v0.2.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.1) - 2026-09-07
+
+### 🐛 Bug Fixes
+
+- **(deps)** update module github.com/pelletier/go-toml/v2 to v2.4.3 (#4) - [6c75d2d](https://github.com/liblaf/swarmfolio/commit/6c75d2d3ab7e7fccc3a115bdce1c4af5dfebaa5f) by [@renovate[bot]](https://github.com/apps/renovate)
+
+### ⚙️ Continuous Integrations
+
+- **(deps)** update actions/setup-go digest to 924ae3a (#3) - [378237b](https://github.com/liblaf/swarmfolio/commit/378237b6dae074361baa4e1c85b8fb9c0b31bde1) by [@renovate[bot]](https://github.com/apps/renovate)
+- **(deps)** update actions/setup-go action to v7 (#5) - [d1c88e2](https://github.com/liblaf/swarmfolio/commit/d1c88e2f56e9e50fb11928c7240b1410e7625542) by [@renovate[bot]](https://github.com/apps/renovate)
+
+### ❤️ Contributors
+
+- [@renovate[bot]](https://github.com/apps/renovate) made their first contribution in [#5](https://github.com/liblaf/swarmfolio/pull/5)
+
+## [v0.2.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.0) - 2026-09-05
 
 ### ✨ Features
 
@@ -16,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.1.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.1.0) - 2026-09-04
