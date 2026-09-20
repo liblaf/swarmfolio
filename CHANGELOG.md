@@ -7,7 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.2.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.1) - 2026-09-07
+## [v0.2.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.2) - 2026-09-20
+
+### ✨ Features
+
+- release macOS and Windows executables (#11) - [d1a11b8](https://github.com/liblaf/swarmfolio/commit/d1a11b812a988e4238584fd4c038413f177c727e) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+- [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier)
+
+## [v0.2.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.1) - 2026-09-13
 
 ### 🐛 Bug Fixes
 
@@ -20,12 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
+- [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier) made their first contribution in [#9](https://github.com/liblaf/swarmfolio/pull/9)
 - [@renovate[bot]](https://github.com/apps/renovate) made their first contribution in [#5](https://github.com/liblaf/swarmfolio/pull/5)
 
 ## [v0.2.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.0) - 2026-09-05
 
 ### ✨ Features
 
+- enforce automatic category management - [207eebd](https://github.com/liblaf/swarmfolio/commit/207eebd80023ec5b21ab633d10e00419f6dda0a1) by [@liblaf](https://github.com/liblaf)
 - use category-only torrent ownership - [421b267](https://github.com/liblaf/swarmfolio/commit/421b267243cef97b1e14fd359f7eec284e7ff0bc) by [@liblaf](https://github.com/liblaf)
 - authenticate qBittorrent with API key - [85b74ca](https://github.com/liblaf/swarmfolio/commit/85b74caf8ad3ad064c4131cb78f514b939f08604) by [@liblaf](https://github.com/liblaf)
 
@@ -39,9 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### ✨ Features
 
 - implement stateless freeleech optimizer - [ee791a0](https://github.com/liblaf/swarmfolio/commit/ee791a0c2f7291a4ece55514e6df81ecbd0bfd67) by [@liblaf](https://github.com/liblaf)
-- enforce automatic category management - [207eebd](https://github.com/liblaf/swarmfolio/commit/207eebd80023ec5b21ab633d10e00419f6dda0a1) by [@liblaf](https://github.com/liblaf)
 
 ### ❤️ Contributors
 
-- [@liblaf](https://github.com/liblaf) made their first contribution
 - [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please) made their first contribution in [#2](https://github.com/liblaf/swarmfolio/pull/2)
+- [@liblaf](https://github.com/liblaf) made their first contribution
