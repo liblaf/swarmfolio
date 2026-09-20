@@ -154,6 +154,9 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	report.TorrentCount = len(state.all)
 	if state.budget.LimitBytes == 0 {
 		report.ProjectedUsedBytes = state.budget.UsedBytes
+		if state.budget.UsedBytes > 0 || state.budget.FreeBytes-state.budget.OutstandingBytes < state.budget.RequiredFreeBytes {
+			return report, errors.New("cannot preserve the category disk free-space reserve: no safe portfolio budget remains")
+		}
 		return report, nil
 	}
 
@@ -163,6 +166,9 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 	report.ProjectedUsedBytes = plan.UsedBytes
 	report.Actions = reportActions(plan)
+	if plan.UsedBytes > plan.LimitBytes {
+		return report, fmt.Errorf("no safe plan fits the %d-byte portfolio limit while preserving %d free bytes", plan.LimitBytes, state.budget.RequiredFreeBytes)
+	}
 	if !apply {
 		return report, nil
 	}
@@ -176,6 +182,9 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	final, err := r.snapshot(ctx)
 	if err != nil {
 		return report, fmt.Errorf("verify final qBittorrent state: %w", err)
+	}
+	if final.budget.FreeBytes-final.budget.OutstandingBytes < final.budget.RequiredFreeBytes {
+		return report, fmt.Errorf("final category disk cannot preserve %d free bytes after outstanding downloads complete", final.budget.RequiredFreeBytes)
 	}
 	if final.budget.UsedBytes > final.budget.LimitBytes {
 		return report, fmt.Errorf("final portfolio uses %d bytes, exceeding the %d-byte limit", final.budget.UsedBytes, final.budget.LimitBytes)
@@ -196,43 +205,35 @@ func (r Runner) snapshot(ctx context.Context) (snapshot, error) {
 	if !remotePathIsAbs(targetPath) {
 		return snapshot{}, fmt.Errorf("qBittorrent category %q save path must be absolute, got %q", r.Config.QBittorrent.Category, targetPath)
 	}
-	defaultPath := ""
-	if r.Config.Portfolio.DiskCapacityBytes > 0 {
-		defaultPath, err = r.QBittorrent.DefaultSavePath(ctx)
-		if err != nil {
-			return snapshot{}, fmt.Errorf("read qBittorrent default save path: %w", err)
-		}
-	}
-
 	used, outstanding, err := r.account(torrents, targetPath)
 	if err != nil {
 		return snapshot{}, err
 	}
-	var space disk.Space
-	if r.Config.Portfolio.DiskCapacityBytes > 0 {
-		if !remotePathEqual(targetPath, defaultPath) {
-			return snapshot{}, errors.New("portfolio.disk_capacity requires the qBittorrent category and default save paths to match; use local portfolio.disk_path probing for another filesystem")
+	var free int64
+	if r.Config.Portfolio.DiskPath != "" {
+		space, err := r.ProbeDisk(r.Config.Portfolio.DiskPath)
+		if err != nil {
+			return snapshot{}, fmt.Errorf("probe portfolio.disk_path: %w", err)
 		}
-		free, err := r.QBittorrent.FreeSpace(ctx)
+		free = space.FreeBytes
+	} else {
+		defaultPath, err := r.QBittorrent.DefaultSavePath(ctx)
+		if err != nil {
+			return snapshot{}, fmt.Errorf("read qBittorrent default save path: %w", err)
+		}
+		if !within(defaultPath, targetPath) {
+			return snapshot{}, errors.New("qBittorrent category must be within the default save path to use its reported free space; set portfolio.disk_path for another filesystem")
+		}
+		free, err = r.QBittorrent.FreeSpace(ctx)
 		if err != nil {
 			return snapshot{}, fmt.Errorf("read qBittorrent free disk space: %w", err)
 		}
-		space = disk.Space{CapacityBytes: r.Config.Portfolio.DiskCapacityBytes, FreeBytes: free}
-	} else {
-		diskPath := r.Config.Portfolio.DiskPath
-		if diskPath == "" {
-			diskPath = targetPath
-		}
-		space, err = r.ProbeDisk(diskPath)
-		if err != nil {
-			return snapshot{}, fmt.Errorf("probe qBittorrent download disk (set portfolio.disk_path for a container or portfolio.disk_capacity for a remote host): %w", err)
-		}
 	}
 	calculated, err := budget.Calculate(budget.Input{
-		CapacityBytes: space.CapacityBytes, FreeBytes: space.FreeBytes,
+		FreeBytes: free,
 		UsedBytes: used, OutstandingBytes: outstanding,
-		MinimumFreePercent: r.Config.Portfolio.MinimumFreePercent,
-		HardLimitBytes:     r.Config.Portfolio.BudgetBytes,
+		MinimumFreeBytes: r.Config.Portfolio.MinimumFreeBytes,
+		HardLimitBytes:   r.Config.Portfolio.BudgetBytes,
 	})
 	if err != nil {
 		return snapshot{}, err
@@ -251,7 +252,7 @@ func (r Runner) account(torrents []qbittorrent.Torrent, targetPath string) (int6
 			return 0, 0, fmt.Errorf("qBittorrent torrent %q has invalid size or amount_left", torrent.Hash)
 		}
 		remaining = append(remaining, torrent.AmountLeft)
-		if within(targetPath, torrent.SavePath) {
+		if torrent.Category == r.Config.QBittorrent.Category && within(targetPath, torrent.SavePath) {
 			sizes = append(sizes, torrent.Size)
 		}
 	}
@@ -695,18 +696,6 @@ func within(root, child string) bool {
 func remotePathIsAbs(value string) bool {
 	cleaned, _ := cleanRemotePath(value)
 	return cleaned != ""
-}
-
-func remotePathEqual(left, right string) bool {
-	left, leftWindows := cleanRemotePath(left)
-	right, rightWindows := cleanRemotePath(right)
-	if left == "" || right == "" || leftWindows != rightWindows {
-		return false
-	}
-	if leftWindows {
-		return strings.EqualFold(left, right)
-	}
-	return left == right
 }
 
 // cleanRemotePath normalizes an absolute qBittorrent save path without using

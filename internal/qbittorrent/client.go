@@ -67,13 +67,11 @@ type AddRequest struct {
 	AutoTMM      bool
 }
 
-// New constructs a client using qBittorrent's stateless API-key flow.
+// New constructs a client, optionally using qBittorrent's stateless API-key
+// flow when an API key is configured.
 func New(config Config) (*Client, error) {
 	if config.BaseURL == "" {
 		return nil, errors.New("qBittorrent base URL is required")
-	}
-	if config.APIKey == "" {
-		return nil, errors.New("qBittorrent API key is required")
 	}
 	u, err := url.Parse(config.BaseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -319,7 +317,9 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body io.R
 	}
 	request.Header.Set("Origin", c.origin)
 	request.Header.Set("Referer", c.origin+"/")
-	request.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if c.apiKey != "" {
+		request.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 	if contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}

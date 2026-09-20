@@ -67,8 +67,7 @@ func TestLoadRejectsEveryoneReadACL(t *testing.T) {
 }
 
 func privateConfig() []byte {
-	data := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
-	data = strings.Replace(data, `api_key = ""`, `api_key = "qbt-secret"`, 1)
+	data := strings.Replace(Example, `api-key = ""`, `api-key = "mteam-secret"`, 1)
 	return []byte(data)
 }
 

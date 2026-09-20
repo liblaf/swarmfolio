@@ -57,10 +57,21 @@ func TestAPIKeyTorrents(t *testing.T) {
 	}
 }
 
-func TestNewRequiresAPIKey(t *testing.T) {
-	t.Parallel()
-	if _, err := New(Config{BaseURL: "https://qbittorrent.example"}); err == nil {
-		t.Fatal("New succeeded without an API key")
+func TestRequestWithoutAPIKeyOmitsAuthorization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, ok := request.Header["Authorization"]; ok {
+			t.Errorf("Authorization header = %q, want absent", request.Header.Values("Authorization"))
+		}
+		_, _ = io.WriteString(writer, `[]`)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Torrents(context.Background()); err != nil {
+		t.Fatalf("Torrents: %v", err)
 	}
 }
 

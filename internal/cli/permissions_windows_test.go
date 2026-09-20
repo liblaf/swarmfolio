@@ -24,8 +24,7 @@ func TestConfigInitProtectsCredentialsWithWindowsACL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), `api_key = ""`, `api_key = "mteam-secret"`, 1))
-	data = []byte(strings.Replace(string(data), `api_key = ""`, `api_key = "qbt-secret"`, 1))
+	data = []byte(strings.Replace(string(data), `api-key = ""`, `api-key = "mteam-secret"`, 1))
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

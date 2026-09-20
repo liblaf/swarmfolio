@@ -23,11 +23,7 @@ const Example = `# Swarmfolio is stateless. qBittorrent is its only persistent s
 # Optional settings use the documented defaults; see README for overrides.
 
 [mteam]
-api_key = ""
-
-[qbittorrent]
-base_url = "http://127.0.0.1:8080"
-api_key = ""
+api-key = ""
 `
 
 type fileConfig struct {
@@ -40,25 +36,27 @@ type fileConfig struct {
 }
 
 type filePortfolio struct {
-	Budget             string   `toml:"budget"`
-	MinimumFreePercent *float64 `toml:"minimum_free_percent"`
-	DiskPath           string   `toml:"disk_path"`
-	DiskCapacity       string   `toml:"disk_capacity"`
+	Budget           string  `toml:"budget"`
+	MinimumFree      *string `toml:"minimum_free"`
+	MinimumFreeKebab *string `toml:"minimum-free"`
+	DiskPath         string  `toml:"disk_path"`
 }
 
 type fileMTeam struct {
-	BaseURL  *string `toml:"base_url"`
-	APIKey   string  `toml:"api_key"`
-	Mode     *string `toml:"mode"`
-	PageSize *int    `toml:"page_size"`
-	Pages    *int    `toml:"pages"`
-	Timezone *string `toml:"timezone"`
+	BaseURL     *string `toml:"base_url"`
+	APIKey      *string `toml:"api_key"`
+	APIKeyKebab *string `toml:"api-key"`
+	Mode        *string `toml:"mode"`
+	PageSize    *int    `toml:"page_size"`
+	Pages       *int    `toml:"pages"`
+	Timezone    *string `toml:"timezone"`
 }
 
 type fileQBittorrent struct {
-	BaseURL  string  `toml:"base_url"`
-	APIKey   string  `toml:"api_key"`
-	Category *string `toml:"category"`
+	BaseURL     *string `toml:"base_url"`
+	APIKey      *string `toml:"api_key"`
+	APIKeyKebab *string `toml:"api-key"`
+	Category    *string `toml:"category"`
 }
 
 type filePolicy struct {
@@ -87,10 +85,9 @@ type Settings struct {
 }
 
 type Portfolio struct {
-	BudgetBytes        int64
-	MinimumFreePercent float64
-	DiskPath           string
-	DiskCapacityBytes  int64
+	BudgetBytes      int64
+	MinimumFreeBytes int64
+	DiskPath         string
 }
 
 type MTeam struct {
@@ -173,18 +170,32 @@ func Parse(data []byte) (Settings, error) {
 	if raw.Version != nil && *raw.Version != Version {
 		return Settings{}, fmt.Errorf("version must be %d, got %d", Version, *raw.Version)
 	}
+	mteamAPIKey, err := compatibilityAlias("mteam.api_key", raw.MTeam.APIKey, "mteam.api-key", raw.MTeam.APIKeyKebab)
+	if err != nil {
+		return Settings{}, err
+	}
+	qbittorrentAPIKey, err := compatibilityAlias("qbittorrent.api_key", raw.QBittorrent.APIKey, "qbittorrent.api-key", raw.QBittorrent.APIKeyKebab)
+	if err != nil {
+		return Settings{}, err
+	}
 
 	budget, err := optionalBytes("portfolio.budget", raw.Portfolio.Budget)
 	if err != nil {
 		return Settings{}, err
 	}
-	diskCapacity, err := optionalBytes("portfolio.disk_capacity", raw.Portfolio.DiskCapacity)
+	minimumFree, err := compatibilityAlias("portfolio.minimum_free", raw.Portfolio.MinimumFree, "portfolio.minimum-free", raw.Portfolio.MinimumFreeKebab)
 	if err != nil {
 		return Settings{}, err
 	}
-	minimumFreePercent := 25.0
-	if raw.Portfolio.MinimumFreePercent != nil {
-		minimumFreePercent = *raw.Portfolio.MinimumFreePercent
+	if raw.Portfolio.MinimumFree == nil && raw.Portfolio.MinimumFreeKebab == nil {
+		minimumFree = "1 TiB"
+	}
+	minimumFreeBytes, err := optionalBytes("portfolio.minimum_free", minimumFree)
+	if err != nil {
+		return Settings{}, err
+	}
+	if minimumFreeBytes == 0 {
+		return Settings{}, errors.New("portfolio.minimum_free must be positive")
 	}
 	candidateMaxAge, err := positiveDuration("policy.candidate_max_age", defaultString(raw.Policy.CandidateMaxAge, "72h"))
 	if err != nil {
@@ -225,17 +236,17 @@ func Parse(data []byte) (Settings, error) {
 	}
 	settings := Settings{
 		Portfolio: Portfolio{
-			BudgetBytes: budget, MinimumFreePercent: minimumFreePercent,
-			DiskPath: raw.Portfolio.DiskPath, DiskCapacityBytes: diskCapacity,
+			BudgetBytes: budget, MinimumFreeBytes: minimumFreeBytes,
+			DiskPath: raw.Portfolio.DiskPath,
 		},
 		MTeam: MTeam{
-			BaseURL: strings.TrimRight(defaultString(raw.MTeam.BaseURL, "https://api.m-team.cc"), "/"), APIKey: raw.MTeam.APIKey,
+			BaseURL: strings.TrimRight(defaultString(raw.MTeam.BaseURL, "https://api.m-team.cc"), "/"), APIKey: mteamAPIKey,
 			Mode: defaultString(raw.MTeam.Mode, "normal"), PageSize: defaultInt(raw.MTeam.PageSize, 100), Pages: defaultInt(raw.MTeam.Pages, 1),
 			Location: location,
 		},
 		QBittorrent: QBittorrent{
-			BaseURL:  strings.TrimRight(raw.QBittorrent.BaseURL, "/"),
-			APIKey:   raw.QBittorrent.APIKey,
+			BaseURL:  strings.TrimRight(defaultString(raw.QBittorrent.BaseURL, "http://localhost:8080"), "/"),
+			APIKey:   qbittorrentAPIKey,
 			Category: category,
 		},
 		Policy: Policy{
@@ -254,13 +265,6 @@ func Parse(data []byte) (Settings, error) {
 }
 
 func (settings Settings) validate() error {
-	if settings.Portfolio.MinimumFreePercent < 0 || settings.Portfolio.MinimumFreePercent >= 100 ||
-		math.IsNaN(settings.Portfolio.MinimumFreePercent) || math.IsInf(settings.Portfolio.MinimumFreePercent, 0) {
-		return errors.New("portfolio.minimum_free_percent must be between 0 and 100")
-	}
-	if settings.Portfolio.DiskPath != "" && settings.Portfolio.DiskCapacityBytes != 0 {
-		return errors.New("portfolio.disk_path and portfolio.disk_capacity are mutually exclusive")
-	}
 	if settings.Portfolio.DiskPath != "" && !filepath.IsAbs(settings.Portfolio.DiskPath) {
 		return errors.New("portfolio.disk_path must be absolute")
 	}
@@ -282,9 +286,6 @@ func (settings Settings) validate() error {
 	if err := validateURL("qbittorrent.base_url", settings.QBittorrent.BaseURL); err != nil {
 		return err
 	}
-	if settings.QBittorrent.APIKey == "" {
-		return errors.New("qbittorrent.api_key is required")
-	}
 	if settings.QBittorrent.Category == "" || strings.TrimSpace(settings.QBittorrent.Category) != settings.QBittorrent.Category ||
 		strings.ContainsAny(settings.QBittorrent.Category, "\r\n\x00") {
 		return errors.New("qbittorrent.category must be nonempty, trimmed, and contain no line breaks")
@@ -297,6 +298,19 @@ func (settings Settings) validate() error {
 		return errors.New("policy action limits must be positive")
 	}
 	return nil
+}
+
+func compatibilityAlias(firstName string, first *string, secondName string, second *string) (string, error) {
+	if first != nil && second != nil {
+		return "", fmt.Errorf("%s and %s are mutually exclusive", firstName, secondName)
+	}
+	if first != nil {
+		return *first, nil
+	}
+	if second != nil {
+		return *second, nil
+	}
+	return "", nil
 }
 
 func validateURL(name, value string) error {
