@@ -64,6 +64,9 @@ type Report struct {
 	CandidateCount       int           `json:"candidate_count"`
 	SkippedWithoutExpiry int           `json:"skipped_without_expiry"`
 	ProjectedUsedBytes   int64         `json:"projected_used_bytes"`
+	PlanningHorizon      string        `json:"planning_horizon"`
+	ReplacementMargin    float64       `json:"replacement_margin"`
+	NetGain              float64       `json:"net_gain_score_bytes"`
 	Recoveries           []Recovery    `json:"recoveries,omitempty"`
 	Actions              []Action      `json:"actions"`
 }
@@ -75,21 +78,24 @@ type Recovery struct {
 }
 
 type Action struct {
-	CandidateID string    `json:"candidate_id"`
-	Name        string    `json:"name"`
-	SizeBytes   int64     `json:"size_bytes"`
-	Seeders     int       `json:"seeders"`
-	Leechers    int       `json:"leechers"`
-	Opportunity float64   `json:"opportunity"`
-	FreeUntil   time.Time `json:"free_until"`
-	Removals    []Removal `json:"removals"`
-	Applied     bool      `json:"applied"`
+	CandidateID      string    `json:"candidate_id"`
+	Name             string    `json:"name"`
+	SizeBytes        int64     `json:"size_bytes"`
+	Seeders          int       `json:"seeders"`
+	Leechers         int       `json:"leechers"`
+	Opportunity      float64   `json:"opportunity"`
+	UploadMultiplier int       `json:"upload_multiplier"`
+	UploadScore      float64   `json:"upload_score_bytes"`
+	FreeUntil        time.Time `json:"free_until"`
+	Removals         []Removal `json:"removals"`
+	Applied          bool      `json:"applied"`
 }
 
 type Removal struct {
-	Hash      string `json:"hash"`
-	Name      string `json:"name"`
-	SizeBytes int64  `json:"size_bytes"`
+	Hash        string  `json:"hash"`
+	Name        string  `json:"name"`
+	SizeBytes   int64   `json:"size_bytes"`
+	UploadScore float64 `json:"upload_score_bytes"`
 }
 
 type snapshot struct {
@@ -117,7 +123,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 
 	now := r.Now()
-	report := Report{Mode: "plan", GeneratedAt: now, ConfigPath: r.Config.Path, Actions: []Action{}}
+	report := Report{Mode: "plan", GeneratedAt: now, ConfigPath: r.Config.Path, PlanningHorizon: r.Config.Policy.PlanningHorizon.String(), ReplacementMargin: r.Config.Policy.ReplacementMargin, Actions: []Action{}}
 	if apply {
 		report.Mode = "apply"
 	}
@@ -165,6 +171,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		return report, fmt.Errorf("build portfolio plan: %w", err)
 	}
 	report.ProjectedUsedBytes = plan.UsedBytes
+	report.NetGain = plan.NetGain
 	report.Actions = reportActions(plan)
 	if plan.UsedBytes > plan.LimitBytes {
 		return report, fmt.Errorf("no safe plan fits the %d-byte portfolio limit while preserving %d free bytes", plan.LimitBytes, state.budget.RequiredFreeBytes)
@@ -307,6 +314,7 @@ func (r Runner) optimizerConfig(limit int64) optimizer.Config {
 		MinResidency:          r.Config.Policy.MinimumResidency, MinIdle: r.Config.Policy.MinimumIdle,
 		ActiveUploadRate: r.Config.Policy.ActiveUploadRate,
 		MaxAdditions:     r.Config.Policy.MaxAdditions, MaxRemovals: r.Config.Policy.MaxRemovals,
+		PlanningHorizon: r.Config.Policy.PlanningHorizon, ReplacementMargin: r.Config.Policy.ReplacementMargin,
 	}
 }
 
@@ -455,6 +463,10 @@ func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, e
 		if result.ID <= 0 || result.Seeders < 0 || result.Leechers < 0 || result.Seeders > math.MaxInt || result.Leechers > math.MaxInt {
 			return nil, 0, fmt.Errorf("M-Team returned invalid candidate %d", result.ID)
 		}
+		multiplier, err := uploadMultiplier(result.Discount)
+		if err != nil {
+			return nil, 0, err
+		}
 		if result.DiscountEndTime.IsZero() {
 			skipped++
 			continue
@@ -463,9 +475,21 @@ func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, e
 			ID: strconv.FormatInt(result.ID, 10), Name: result.Name, Size: result.Size,
 			Seeders: int(result.Seeders), Leechers: int(result.Leechers),
 			PublishedAt: result.PublishedAt, FreeUntil: result.DiscountEndTime,
+			UploadMultiplier: multiplier,
 		})
 	}
 	return candidates, skipped, nil
+}
+
+func uploadMultiplier(discount string) (int, error) {
+	switch discount {
+	case "FREE":
+		return 1, nil
+	case "_2X_FREE":
+		return 2, nil
+	default:
+		return 0, fmt.Errorf("M-Team returned unsupported freeleech discount %q", discount)
+	}
 }
 
 func reportActions(plan optimizer.Plan) []Action {
@@ -475,11 +499,12 @@ func reportActions(plan optimizer.Plan) []Action {
 		action := Action{
 			CandidateID: candidate.ID, Name: candidate.Name, SizeBytes: candidate.Size,
 			Seeders: candidate.Seeders, Leechers: candidate.Leechers,
-			Opportunity: (float64(candidate.Leechers) + 1) / (float64(candidate.Seeders) + 1),
-			FreeUntil:   candidate.FreeUntil, Removals: make([]Removal, 0, len(addition.Removals)),
+			Opportunity:      float64(candidate.Leechers) / (float64(candidate.Seeders) + 1),
+			UploadMultiplier: candidate.UploadMultiplier, UploadScore: addition.UploadScore,
+			FreeUntil: candidate.FreeUntil, Removals: make([]Removal, 0, len(addition.Removals)),
 		}
 		for _, removal := range addition.Removals {
-			action.Removals = append(action.Removals, Removal{Hash: removal.Hash, Name: removal.Name, SizeBytes: removal.Size})
+			action.Removals = append(action.Removals, Removal{Hash: removal.Hash, Name: removal.Name, SizeBytes: removal.Size, UploadScore: removal.UploadScore})
 		}
 		actions = append(actions, action)
 	}

@@ -13,7 +13,7 @@
 
 </div>
 
-Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. Each run reads the current qBittorrent portfolio, ranks fresh download-free torrents by leecher-to-seeder opportunity, and either uses safe headroom or replaces the least productive eligible torrent.
+Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. Each run chooses a portfolio of download-free torrents to maximize a heuristic score for **M-Team credited upload**, including 2× promotions, within its disk budget and action limits.
 
 ## ✨ Safety Model
 
@@ -137,7 +137,40 @@ The timer is persistent and adds up to five minutes of jitter. Run `loginctl ena
 
 ## 🧠 Selection Policy
 
-Candidates must be recent, have enough freeleech time remaining, and pass the configured swarm thresholds. They are ranked deterministically by `(leechers + 1) / (seeders + 1)`. Eligible category torrents are ranked from lowest to highest lifetime upload throughput per stored byte. Spare capacity is filled first; otherwise the planner removes the weakest managed torrents needed to fit the best candidate while respecting action caps.
+Candidates must be recent, have enough freeleech time remaining, have at least one seeder and one leecher, and pass the configured swarm thresholds. Opportunity is `leechers / (seeders + 1)`: the additional seeder represents us, and zero demand earns no score.
+
+For a planning horizon `H` (default **24 hours**), each candidate receives a credited-byte opportunity score:
+
+```text
+freshness = H / (H + torrent_age)
+credit_factor = 1 + (upload_multiplier - 1) × min(freeleech_remaining / H, 1)
+candidate_score = size × leechers / (seeders + 1) × freshness × credit_factor
+```
+
+`FREE` has an upload multiplier of 1; `_2X_FREE` has a multiplier of 2. The extra credit is prorated over the time remaining in the promotion, while base upload retains value after it ends. Conflicting promotion metadata for the same M-Team ID stops the run.
+
+For each eligible existing torrent, the cost of removing it is:
+
+```text
+retention_score = 2 × max(current_upload_rate, uploaded_bytes / max(age_seconds, 1)) × H_seconds
+net_gain = sum(candidate_score) - replacement_margin × sum(retention_score)
+```
+
+The existing torrent's [qBittorrent upload counters](https://github.com/qbittorrent/qBittorrent/wiki/WebUI-API-%28qBittorrent-5.0%29#get-torrent-list) measure transfer activity; they do not identify its current M-Team promotion. The retention score conservatively reserves 2× credit for incumbents. The default replacement margin of **1.25** adds a further buffer against uncertain acquisition value. Existing ownership, completion, residency, idle-time, and active-upload protections still decide which torrents may be removed.
+
+The planner jointly searches additions and removals for the largest positive `net_gain`, subject to the exact byte budget and both action caps. This lets a pair of candidates beat a single attractive torrent and avoids consuming the removal cap on tiny, low-value torrents. Equal scores favor fewer removals, fewer additions, lower final storage, then stable IDs and hashes. No positive gain means no changes. Removals occur only as part of an addition, and each applied step must fit the budget.
+
+The search uses exact Pareto frontiers over the eligible offers returned by the configured M-Team pages. It fails visibly if its work limit is exceeded; reduce candidate pages or action caps in that case. It does not silently discard candidates or switch to a greedy approximation.
+
+Optional policy overrides:
+
+```toml
+[policy]
+planning_horizon = "24h"
+replacement_margin = 1.25 # Must be finite and at least 1.
+```
+
+The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Minimum freeleech time is an eligibility guard, not proof a download will finish before expiry. Real improvement needs comparison with actual credited upload over time.
 
 The read-only `plan` command never requests a torrent download token and never mutates qBittorrent. `run --apply` downloads metainfo only for selected candidates or interrupted-addition recovery, verifies exact info hashes, uploads additions stopped, rechecks category ownership and size, then performs the replacement.
 

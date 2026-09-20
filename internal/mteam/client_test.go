@@ -54,23 +54,75 @@ func TestSearchSendsFreeleechQueryAndDecodesFlexibleNumbers(t *testing.T) {
 
 func TestSearchDeduplicatesPagesAndRejectsConflicts(t *testing.T) {
 	t.Parallel()
-	for name, conflict := range map[string]bool{"stable": false, "conflict": true} {
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mutate  func(*torrentFixture, searchRequest)
+		wantErr bool
+	}{
+		{
+			name: "stable allows changing swarm counters",
+			mutate: func(item *torrentFixture, query searchRequest) {
+				item.seeders, item.leechers = int64(query.PageNumber), int64(query.PageNumber+1)
+			},
+		},
+		{
+			name: "name", wantErr: true,
+			mutate: func(item *torrentFixture, query searchRequest) {
+				if query.PageNumber == 2 {
+					item.name = "changed"
+				}
+			},
+		},
+		{
+			name: "size", wantErr: true,
+			mutate: func(item *torrentFixture, query searchRequest) {
+				if query.PageNumber == 2 {
+					item.size = 2
+				}
+			},
+		},
+		{
+			name: "published time", wantErr: true,
+			mutate: func(item *torrentFixture, query searchRequest) {
+				if query.PageNumber == 2 {
+					item.publishedAt = "2099-01-02 00:00:00"
+				}
+			},
+		},
+		{
+			name: "promotion", wantErr: true,
+			mutate: func(item *torrentFixture, query searchRequest) {
+				if query.PageNumber == 2 {
+					item.discount = "_2X_FREE"
+				}
+			},
+		},
+		{
+			name: "promotion expiry", wantErr: true,
+			mutate: func(item *torrentFixture, query searchRequest) {
+				if query.PageNumber == 2 {
+					item.discountEndTime = "2099-01-02 00:00:00"
+				}
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var query searchRequest
 				if err := json.NewDecoder(r.Body).Decode(&query); err != nil {
 					t.Fatal(err)
 				}
-				name, size := "one", 1
-				if query.PageNumber == 2 && query.Discount == "_2X_FREE" && conflict {
-					name, size = "changed", 2
-				}
-				io.WriteString(w, `{"code":0,"data":{"data":[{"id":1,"name":"`+name+`","size":`+strconv.Itoa(size)+`,"createdDate":"2099-01-01 00:00:00","status":{"discount":"`+query.Discount+`","seeders":1,"leechers":1}}]}}`)
+				// The result's offer data remains stable across FREE and _2X_FREE
+				// queries. The query filter is not a substitute for its status.
+				item := torrentFixture{name: "one", size: 1, publishedAt: "2099-01-01 00:00:00", discount: "FREE", discountEndTime: "2099-01-01 01:00:00", seeders: 1, leechers: 1}
+				test.mutate(&item, query)
+				io.WriteString(w, item.response())
 			}))
 			defer server.Close()
 
 			results, err := testClient(t, server.URL, Config{Pages: 2}).Search(context.Background())
-			if conflict {
+			if test.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "conflicting duplicate") {
 					t.Fatalf("Search error = %v", err)
 				}
@@ -84,6 +136,15 @@ func TestSearchDeduplicatesPagesAndRejectsConflicts(t *testing.T) {
 			}
 		})
 	}
+}
+
+type torrentFixture struct {
+	name, publishedAt, discount, discountEndTime string
+	size, seeders, leechers                      int64
+}
+
+func (item torrentFixture) response() string {
+	return `{"code":0,"data":{"data":[{"id":1,"name":"` + item.name + `","size":` + strconv.FormatInt(item.size, 10) + `,"createdDate":"` + item.publishedAt + `","status":{"discount":"` + item.discount + `","discountEndTime":"` + item.discountEndTime + `","seeders":` + strconv.FormatInt(item.seeders, 10) + `,"leechers":` + strconv.FormatInt(item.leechers, 10) + `}}]}}`
 }
 
 func TestSearchRejectsAPIErrorAndMalformedFreeTorrent(t *testing.T) {

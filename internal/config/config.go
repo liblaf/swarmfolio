@@ -61,6 +61,7 @@ type fileQBittorrent struct {
 
 type filePolicy struct {
 	CandidateMaxAge           *string  `toml:"candidate_max_age"`
+	PlanningHorizon           *string  `toml:"planning_horizon"`
 	MinimumFreeleechRemaining *string  `toml:"minimum_freeleech_remaining"`
 	MinimumLeechers           *int     `toml:"minimum_leechers"`
 	MinimumOpportunityRatio   *float64 `toml:"minimum_opportunity_ratio"`
@@ -69,6 +70,7 @@ type filePolicy struct {
 	ActiveUploadRate          *string  `toml:"active_upload_rate"`
 	MaxAdditions              *int     `toml:"max_additions"`
 	MaxRemovals               *int     `toml:"max_removals"`
+	ReplacementMargin         *float64 `toml:"replacement_margin"`
 }
 
 type fileHTTP struct {
@@ -107,6 +109,7 @@ type QBittorrent struct {
 
 type Policy struct {
 	CandidateMaxAge           time.Duration
+	PlanningHorizon           time.Duration
 	MinimumFreeleechRemaining time.Duration
 	MinimumLeechers           int
 	MinimumOpportunityRatio   float64
@@ -115,6 +118,7 @@ type Policy struct {
 	ActiveUploadRate          int64
 	MaxAdditions              int
 	MaxRemovals               int
+	ReplacementMargin         float64
 }
 
 func DefaultPath() (string, error) {
@@ -201,6 +205,10 @@ func Parse(data []byte) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	planningHorizon, err := positiveDuration("policy.planning_horizon", defaultString(raw.Policy.PlanningHorizon, "24h"))
+	if err != nil {
+		return Settings{}, err
+	}
 	freeRemaining, err := nonnegativeDuration("policy.minimum_freeleech_remaining", defaultString(raw.Policy.MinimumFreeleechRemaining, "2h"))
 	if err != nil {
 		return Settings{}, err
@@ -250,11 +258,12 @@ func Parse(data []byte) (Settings, error) {
 			Category: category,
 		},
 		Policy: Policy{
-			CandidateMaxAge: candidateMaxAge, MinimumFreeleechRemaining: freeRemaining,
+			CandidateMaxAge: candidateMaxAge, PlanningHorizon: planningHorizon, MinimumFreeleechRemaining: freeRemaining,
 			MinimumLeechers:         defaultInt(raw.Policy.MinimumLeechers, 1),
 			MinimumOpportunityRatio: defaultFloat64(raw.Policy.MinimumOpportunityRatio, 0.1),
 			MinimumResidency:        residency, MinimumIdle: idle, ActiveUploadRate: uploadRate,
 			MaxAdditions: defaultInt(raw.Policy.MaxAdditions, 2), MaxRemovals: defaultInt(raw.Policy.MaxRemovals, 4),
+			ReplacementMargin: defaultFloat64(raw.Policy.ReplacementMargin, 1.25),
 		},
 		HTTPTimeout: timeout,
 	}
@@ -296,6 +305,9 @@ func (settings Settings) validate() error {
 	}
 	if settings.Policy.MaxAdditions < 1 || settings.Policy.MaxRemovals < 1 {
 		return errors.New("policy action limits must be positive")
+	}
+	if settings.Policy.ReplacementMargin < 1 || math.IsNaN(settings.Policy.ReplacementMargin) || math.IsInf(settings.Policy.ReplacementMargin, 0) {
+		return errors.New("policy.replacement_margin must be finite and at least 1")
 	}
 	return nil
 }

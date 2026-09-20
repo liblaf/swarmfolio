@@ -149,7 +149,7 @@ func (c *Client) Search(ctx context.Context) ([]Torrent, error) {
 					continue
 				}
 				if existing, ok := seen[torrent.ID]; ok {
-					if existing.Name != torrent.Name || existing.Size != torrent.Size {
+					if !sameTorrentIdentity(existing, torrent) {
 						return nil, fmt.Errorf("mteam: conflicting duplicate torrent ID %d", torrent.ID)
 					}
 					continue
@@ -160,6 +160,15 @@ func (c *Client) Search(ctx context.Context) ([]Torrent, error) {
 		}
 	}
 	return torrents, nil
+}
+
+// sameTorrentIdentity compares fields that identify the offer. Seeder and
+// leecher counts are intentionally excluded because separate paginated search
+// responses may observe the swarm at different moments.
+func sameTorrentIdentity(a, b Torrent) bool {
+	return a.Name == b.Name && a.Size == b.Size &&
+		a.PublishedAt.Equal(b.PublishedAt) && a.Discount == b.Discount &&
+		a.DiscountEndTime.Equal(b.DiscountEndTime)
 }
 
 // Download obtains an ephemeral token for id and returns verified torrent

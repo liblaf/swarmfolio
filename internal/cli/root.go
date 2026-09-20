@@ -295,6 +295,9 @@ func writeReport(writer io.Writer, report app.Report) {
 		formatBytes(report.Budget.FreeBytes), formatBytes(report.Budget.RequiredFreeBytes))
 	fmt.Fprintf(writer, "Portfolio: %s now; %s limit; %s projected\n",
 		formatBytes(report.Budget.UsedBytes), formatBytes(report.Budget.LimitBytes), formatBytes(report.ProjectedUsedBytes))
+	if report.PlanningHorizon != "" {
+		fmt.Fprintf(writer, "Credited-upload heuristic horizon: %s; replacement margin %.2f; net credit score %.0f bytes\n", report.PlanningHorizon, report.ReplacementMargin, report.NetGain)
+	}
 	for _, recovery := range report.Recoveries {
 		fmt.Fprintf(writer, "Recovered: %s %s (%s)\n", recovery.Action, recovery.Name, shortHash(recovery.Hash))
 	}
@@ -303,10 +306,10 @@ func writeReport(writer io.Writer, report app.Report) {
 		if action.Applied {
 			verb = "Added"
 		}
-		fmt.Fprintf(writer, "%s: %s [M-Team %s, %s, %dL/%dS, score %.3f]\n",
-			verb, action.Name, action.CandidateID, formatBytes(action.SizeBytes), action.Leechers, action.Seeders, action.Opportunity)
+		fmt.Fprintf(writer, "%s: %s [M-Team %s, %s, %dL/%dS, opportunity %.3f, %dx credit, credit score %.0f bytes]\n",
+			verb, action.Name, action.CandidateID, formatBytes(action.SizeBytes), action.Leechers, action.Seeders, action.Opportunity, action.UploadMultiplier, action.UploadScore)
 		for _, removal := range action.Removals {
-			fmt.Fprintf(writer, "  Replace: %s (%s, %s)\n", removal.Name, shortHash(removal.Hash), formatBytes(removal.SizeBytes))
+			fmt.Fprintf(writer, "  Replace: %s (%s, %s, credit score %.0f bytes)\n", removal.Name, shortHash(removal.Hash), formatBytes(removal.SizeBytes), removal.UploadScore)
 		}
 	}
 	if len(report.Actions) == 0 && len(report.Recoveries) == 0 {

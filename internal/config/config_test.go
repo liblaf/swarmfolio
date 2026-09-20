@@ -80,6 +80,7 @@ api_key = "qbt-secret"
 		"[mteam]\nmode = \"\"\n",
 		"[mteam]\ntimezone = \"\"\n",
 		"[policy]\ncandidate_max_age = \"\"\n",
+		"[policy]\nplanning_horizon = \"\"\n",
 		"[policy]\nactive_upload_rate = \"\"\n",
 		"[http]\ntimeout = \"\"\n",
 	} {
@@ -265,11 +266,29 @@ api_key = "mteam-secret"
 		settings.MTeam.Location.String() != "Asia/Shanghai" || settings.HTTPTimeout.String() != "30s" {
 		t.Fatalf("unexpected defaults: %#v", settings)
 	}
-	if settings.Policy.CandidateMaxAge.String() != "72h0m0s" || settings.Policy.MinimumFreeleechRemaining.String() != "2h0m0s" ||
+	if settings.Policy.CandidateMaxAge.String() != "72h0m0s" || settings.Policy.PlanningHorizon.String() != "24h0m0s" || settings.Policy.MinimumFreeleechRemaining.String() != "2h0m0s" ||
 		settings.Policy.MinimumLeechers != 1 || settings.Policy.MinimumOpportunityRatio != 0.1 ||
 		settings.Policy.MinimumResidency.String() != "24h0m0s" || settings.Policy.MinimumIdle.String() != "6h0m0s" ||
-		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 {
+		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 || settings.Policy.ReplacementMargin != 1.25 {
 		t.Fatalf("unexpected policy defaults: %#v", settings.Policy)
+	}
+}
+
+func TestParseRejectsInvalidCreditedUploadPolicy(t *testing.T) {
+	t.Parallel()
+	for _, policy := range []string{
+		"planning_horizon = \"0s\"",
+		"planning_horizon = \"-1h\"",
+		"replacement_margin = 0.99",
+	} {
+		policy := policy
+		t.Run(policy, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[policy]\n" + policy + "\n"))
+			if err == nil {
+				t.Fatalf("Parse() accepted invalid policy %q", policy)
+			}
+		})
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liblaf/swarmfolio/internal/app"
 	"github.com/liblaf/swarmfolio/internal/budget"
@@ -117,6 +118,25 @@ func TestReportShowsFixedReserve(t *testing.T) {
 	writeReport(&output, app.Report{Budget: budget.Result{FreeBytes: 2 << 40, RequiredFreeBytes: 1 << 40}})
 	if !strings.Contains(output.String(), "Download disk: 2.0 TiB free; reserve 1.0 TiB\n") {
 		t.Fatalf("unexpected reserve display: %s", output.String())
+	}
+}
+
+func TestReportLabelsCreditedUploadScoresAsHeuristics(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	writeReport(&output, app.Report{
+		PlanningHorizon: time.Hour.String(), ReplacementMargin: 1.25, NetGain: 42,
+		Actions: []app.Action{{
+			CandidateID: "2", Name: "candidate", SizeBytes: 10, Seeders: 1, Leechers: 2,
+			UploadMultiplier: 2, UploadScore: 100,
+			Removals: []app.Removal{{Hash: "abc", Name: "old", SizeBytes: 10, UploadScore: 50}},
+		}},
+	})
+	got := output.String()
+	for _, want := range []string{"Credited-upload heuristic horizon: 1h0m0s; replacement margin 1.25; net credit score 42 bytes", "2x credit, credit score 100 bytes", "credit score 50 bytes"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("report %q does not contain %q", got, want)
+		}
 	}
 }
 

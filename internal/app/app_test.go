@@ -32,6 +32,35 @@ func TestExecutePlansWithoutMutating(t *testing.T) {
 	if report.Budget.RequiredFreeBytes != 25 || report.Budget.LimitBytes != 75 {
 		t.Fatalf("budget = %#v", report.Budget)
 	}
+	if report.PlanningHorizon != "24h0m0s" || report.ReplacementMargin != 1.25 || report.NetGain <= 0 || report.Actions[0].UploadMultiplier != 1 || report.Actions[0].UploadScore <= 0 || report.Actions[0].Removals[0].UploadScore <= 0 {
+		t.Fatalf("credited-upload report = %#v", report)
+	}
+}
+
+func TestOptimizerCandidatesMapsMTeamPromotionMultiplier(t *testing.T) {
+	t.Parallel()
+	results := []mteam.Torrent{{
+		ID: 2, Name: "two-x", Size: 30, Seeders: 1, Leechers: 8,
+		PublishedAt: appNow.Add(-time.Hour), Discount: "_2X_FREE", DiscountEndTime: appNow.Add(time.Hour),
+	}}
+	candidates, skipped, err := optimizerCandidates(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 0 || len(candidates) != 1 || candidates[0].UploadMultiplier != 2 {
+		t.Fatalf("candidates=%#v skipped=%d", candidates, skipped)
+	}
+}
+
+func TestOptimizerCandidatesRejectsUnsupportedPromotion(t *testing.T) {
+	t.Parallel()
+	_, _, err := optimizerCandidates([]mteam.Torrent{{
+		ID: 2, Name: "unknown", Size: 30, Seeders: 1, Leechers: 8,
+		PublishedAt: appNow.Add(-time.Hour), Discount: "HALF", DiscountEndTime: appNow.Add(time.Hour),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "unsupported freeleech discount") {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 func TestExecuteAppliesPausedAdditionBeforeDeletion(t *testing.T) {
@@ -70,7 +99,7 @@ func TestExecuteRemovesExpiredEmptyPendingTorrent(t *testing.T) {
 	}}}
 	mt := &fakeMTeam{results: []mteam.Torrent{{
 		ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
-		PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(30 * time.Minute),
+		PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(30 * time.Minute),
 	}}}
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err != nil {
@@ -404,7 +433,7 @@ func TestExecuteRecoversSafePendingTorrent(t *testing.T) {
 	}
 	mt := &fakeMTeam{results: []mteam.Torrent{{
 		ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
-		PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour),
+		PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour),
 	}}, metainfo: metainfoBytes}
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err != nil {
@@ -448,7 +477,7 @@ func TestExecuteRefusesRecoveryAfterPendingStateChanges(t *testing.T) {
 			mt := &fakeMTeam{
 				results: []mteam.Torrent{{
 					ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
-					PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour),
+					PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour),
 				}},
 				metainfo: test.metainfo,
 				onDownload: func(int64) {
@@ -476,8 +505,8 @@ func TestExecuteRecoversAmbiguousPendingTorrentByExactHash(t *testing.T) {
 	qbt := pendingQBT(pendingHash)
 	mt := &fakeMTeam{
 		results: []mteam.Torrent{
-			{ID: 8, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour)},
-			{ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour)},
+			{ID: 8, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour)},
+			{ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour)},
 		},
 		metainfoByID: map[int64][]byte{
 			8: []byte("d4:infod6:lengthi30e4:name5:wrongee"),
@@ -545,6 +574,7 @@ func testRunner(qbt *fakeQBT, mt *fakeMTeam) Runner {
 				MinimumLeechers: 1, MinimumOpportunityRatio: 0.5,
 				MinimumResidency: time.Hour, MinimumIdle: time.Hour,
 				ActiveUploadRate: 1, MaxAdditions: 1, MaxRemovals: 1,
+				PlanningHorizon: 24 * time.Hour, ReplacementMargin: 1.25,
 			},
 		},
 		QBittorrent: qbt, MTeam: mt, Now: func() time.Time { return appNow },
@@ -574,7 +604,7 @@ func testServices(t *testing.T) (*fakeQBT, *fakeMTeam) {
 	mt := &fakeMTeam{
 		results: []mteam.Torrent{{
 			ID: 2, Name: "new", Size: 30, Seeders: 1, Leechers: 8,
-			PublishedAt: appNow.Add(-time.Hour), DiscountEndTime: appNow.Add(3 * time.Hour),
+			PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour),
 		}},
 		metainfo: metainfoBytes,
 	}

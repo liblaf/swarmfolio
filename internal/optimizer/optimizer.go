@@ -12,13 +12,14 @@ import (
 
 // Candidate is a transient freeleech offer from the configured M-Team source.
 type Candidate struct {
-	ID          string
-	Name        string
-	Size        int64
-	Seeders     int
-	Leechers    int
-	PublishedAt time.Time
-	FreeUntil   time.Time
+	ID               string
+	Name             string
+	Size             int64
+	Seeders          int
+	Leechers         int
+	PublishedAt      time.Time
+	FreeUntil        time.Time
+	UploadMultiplier int
 }
 
 // Torrent is qBittorrent's current view of a torrent.
@@ -50,19 +51,23 @@ type Config struct {
 	ActiveUploadRate      int64
 	MaxAdditions          int
 	MaxRemovals           int
+	PlanningHorizon       time.Duration
+	ReplacementMargin     float64
 }
 
 // Removal records a torrent that the caller is authorized to remove.
 type Removal struct {
-	Hash string
-	Name string
-	Size int64
+	Hash        string
+	Name        string
+	Size        int64
+	UploadScore float64
 }
 
 // Addition records a candidate and the removals required before it may run.
 type Addition struct {
-	Candidate Candidate
-	Removals  []Removal
+	Candidate   Candidate
+	Removals    []Removal
+	UploadScore float64
 }
 
 // Plan is the complete, side-effect-free result of Build.
@@ -70,6 +75,7 @@ type Plan struct {
 	Additions  []Addition
 	UsedBytes  int64
 	LimitBytes int64
+	NetGain    float64
 }
 
 // Build selects candidates in a stable order and returns only removals owned by
@@ -98,64 +104,17 @@ func Build(now time.Time, candidates []Candidate, torrents []Torrent, cfg Config
 
 	limit := cfg.BudgetBytes - cfg.ReserveBytes
 	eligible := removable(now, torrents, cfg)
-	slices.SortFunc(eligible, func(a, b Torrent) int {
-		if au, bu := utility(now, a), utility(now, b); au != bu {
-			return cmpFloat(au, bu)
-		}
-		return strings.Compare(a.Hash, b.Hash)
-	})
-
+	slices.SortFunc(eligible, func(a, b Torrent) int { return strings.Compare(a.Hash, b.Hash) })
 	filtered := make([]Candidate, 0, len(candidates))
 	for _, c := range candidates {
-		if candidateEligible(now, c, cfg) {
+		if candidateEligible(now, c, cfg) && c.Size <= limit {
 			filtered = append(filtered, c)
 		}
 	}
 	slices.SortFunc(filtered, func(a, b Candidate) int {
-		if ao, bo := opportunity(a), opportunity(b); ao != bo {
-			return cmpFloat(bo, ao)
-		}
-		if n := strings.Compare(a.ID, b.ID); n != 0 {
-			return n
-		}
-		return strings.Compare(a.Name, b.Name)
+		return strings.Compare(a.ID, b.ID)
 	})
-
-	plan := Plan{UsedBytes: used, LimitBytes: limit}
-	removed := make(map[string]bool)
-	removalCount := 0
-	for _, candidate := range filtered {
-		if len(plan.Additions) == cfg.MaxAdditions {
-			break
-		}
-		if candidate.Size > math.MaxInt64-used {
-			return Plan{}, errors.New("optimizer: planned torrent size overflows int64")
-		}
-		needed := used + candidate.Size - limit
-		var rs []Removal
-		for _, t := range eligible {
-			if needed <= 0 {
-				break
-			}
-			if removed[t.Hash] || removalCount+len(rs) >= cfg.MaxRemovals {
-				continue
-			}
-			rs = append(rs, Removal{Hash: t.Hash, Name: t.Name, Size: t.Size})
-			needed -= t.Size
-		}
-		if needed > 0 {
-			continue
-		}
-		for _, r := range rs {
-			removed[r.Hash] = true
-			used -= r.Size
-		}
-		removalCount += len(rs)
-		used += candidate.Size
-		plan.Additions = append(plan.Additions, Addition{Candidate: candidate, Removals: rs})
-	}
-	plan.UsedBytes = used
-	return plan, nil
+	return selectPortfolio(now, filtered, eligible, used, limit, cfg)
 }
 
 func validateConfig(c Config) error {
@@ -174,6 +133,9 @@ func validateConfig(c Config) error {
 	if math.IsNaN(c.MinOpportunityRatio) || math.IsInf(c.MinOpportunityRatio, 0) {
 		return errors.New("optimizer: minimum opportunity ratio must be finite")
 	}
+	if c.PlanningHorizon <= 0 || c.ReplacementMargin < 1 || math.IsNaN(c.ReplacementMargin) || math.IsInf(c.ReplacementMargin, 0) {
+		return errors.New("optimizer: planning horizon must be positive and replacement margin must be finite and at least one")
+	}
 	return nil
 }
 
@@ -181,7 +143,7 @@ func validateTorrents(torrents []Torrent) (int64, error) {
 	used := int64(0)
 	hashes := make(map[string]bool, len(torrents))
 	for _, t := range torrents {
-		if t.Hash == "" || t.Size < 0 || t.Uploaded < 0 || t.UploadRate < 0 || t.Progress < 0 || t.Progress > 1 || t.AddedAt.IsZero() || t.LastActivity.IsZero() {
+		if t.Hash == "" || t.Size < 0 || t.Uploaded < 0 || t.UploadRate < 0 || math.IsNaN(t.Progress) || t.Progress < 0 || t.Progress > 1 || t.AddedAt.IsZero() || t.LastActivity.IsZero() {
 			return 0, fmt.Errorf("optimizer: invalid torrent %q", t.Hash)
 		}
 		if hashes[t.Hash] {
@@ -199,7 +161,7 @@ func validateTorrents(torrents []Torrent) (int64, error) {
 func validateCandidates(candidates []Candidate) error {
 	ids := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
-		if c.ID == "" || c.Size <= 0 || c.Seeders < 0 || c.Leechers < 0 || c.PublishedAt.IsZero() || c.FreeUntil.IsZero() {
+		if c.ID == "" || c.Size <= 0 || c.Seeders < 0 || c.Leechers < 0 || c.PublishedAt.IsZero() || c.FreeUntil.IsZero() || (c.UploadMultiplier != 1 && c.UploadMultiplier != 2) {
 			return fmt.Errorf("optimizer: invalid candidate %q", c.ID)
 		}
 		if ids[c.ID] {
@@ -213,6 +175,7 @@ func validateCandidates(candidates []Candidate) error {
 func candidateEligible(now time.Time, c Candidate, cfg Config) bool {
 	age := now.Sub(c.PublishedAt)
 	return age >= 0 && age <= cfg.CandidateMaxAge &&
+		c.FreeUntil.After(now) && c.Leechers > 0 && c.Seeders > 0 &&
 		c.FreeUntil.Sub(now) >= cfg.MinFreeleechRemaining &&
 		c.Leechers >= cfg.MinLeechers && opportunity(c) >= cfg.MinOpportunityRatio
 }
@@ -237,19 +200,28 @@ func busyState(state string) bool {
 }
 
 func opportunity(c Candidate) float64 {
-	return (float64(c.Leechers) + 1) / (float64(c.Seeders) + 1)
+	return float64(c.Leechers) / (float64(c.Seeders) + 1)
 }
 
-func utility(now time.Time, t Torrent) float64 {
-	age := now.Sub(t.AddedAt).Seconds()
-	if age < 1 {
-		age = 1
-	}
-	size := t.Size
-	if size < 1 {
-		size = 1
-	}
-	return float64(t.Uploaded) / age / float64(size)
+// candidateScore is a credited-byte opportunity proxy, not a calibrated forecast.
+// Assume one generation of full-file leecher demand shared with the seeders,
+// discount stale demand, and prorate the bonus over the planning horizon. Base
+// upload remains valuable after freeleech ends; only the extra credit expires.
+func candidateScore(now time.Time, c Candidate, horizon time.Duration) float64 {
+	h := horizon.Seconds()
+	freshness := h / (h + now.Sub(c.PublishedAt).Seconds())
+	bonusFraction := min(1.0, c.FreeUntil.Sub(now).Seconds()/h)
+	multiplier := 1 + float64(c.UploadMultiplier-1)*bonusFraction
+	return float64(c.Size) * opportunity(c) * freshness * multiplier
+}
+
+// retentionScore values forgone upload in the same horizon. The search feed
+// cannot reliably identify every incumbent's current promotion by infohash, so
+// reserve 2x credit for incumbents instead of assuming they earn only 1x.
+func retentionScore(now time.Time, t Torrent, horizon time.Duration) float64 {
+	age := max(1.0, now.Sub(t.AddedAt).Seconds())
+	rate := max(float64(t.UploadRate), float64(t.Uploaded)/age)
+	return 2 * rate * horizon.Seconds()
 }
 
 func cmpFloat(a, b float64) int {
