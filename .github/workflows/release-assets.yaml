@@ -68,37 +68,21 @@ jobs:
     name: Release executables
     needs: test
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: 0
     steps:
       - name: Checkout release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.TAG }}
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build executables
-        run: |
-          for target in darwin/arm64 linux/amd64 windows/amd64; do
-            export GOOS="${target%/*}" GOARCH="${target#*/}"
-            executable="swarmfolio-${GOOS}-${GOARCH}"
-            if [ "$GOOS" = windows ]; then
-              executable="${executable}.exe"
-            fi
-            go build -trimpath \
-              -ldflags "-s -w -X github.com/liblaf/swarmfolio/internal/buildinfo.Version=${TAG}" \
-              -o "dist/${executable}" ./cmd/swarmfolio
-          done
-          # Preserve the original Linux asset name for existing installers.
-          cp dist/swarmfolio-linux-amd64 dist/swarmfolio
-          test "$(./dist/swarmfolio --version)" = "swarmfolio version ${TAG}"
-      - name: Generate checksums
-        working-directory: dist
-        run: sha256sum swarmfolio* > SHA256SUMS
-      - name: Upload executables and checksums
-        run: gh release upload "$TAG" dist/* --clobber
+      - name: Publish executables with GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          version: "~> v2"
+          args: release --clean
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}

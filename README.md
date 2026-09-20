@@ -34,13 +34,13 @@ GitHub Releases provide standalone executables for these targets:
 | Linux x86-64 (`linux/amd64`) | `swarmfolio-linux-amd64` |
 | Windows x86-64 (`windows/amd64`) | `swarmfolio-windows-amd64.exe` |
 
-Download the matching asset from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), rename it to `swarmfolio` (or `swarmfolio.exe` on Windows), and place it on your `PATH`. On macOS and Linux, make it executable with `chmod +x swarmfolio`. Each release includes `SHA256SUMS` for verifying downloads.
+Download the matching asset from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), rename it to `swarmfolio` (or `swarmfolio.exe` on Windows), and place it on your `PATH`. On macOS and Linux, make it executable with `chmod +x swarmfolio`.
 
-The original `swarmfolio` asset remains a copy of the Linux AMD64 executable, so existing installations can continue using:
+For Linux AMD64:
 
 ```bash
 install -d ~/.local/bin
-gh release download --repo liblaf/swarmfolio --pattern swarmfolio --dir ~/.local/bin --clobber
+gh release download --repo liblaf/swarmfolio --pattern swarmfolio-linux-amd64 --output ~/.local/bin/swarmfolio --clobber
 chmod +x ~/.local/bin/swarmfolio
 ```
 
@@ -131,7 +131,14 @@ go vet ./...
 go build ./cmd/swarmfolio
 ```
 
-Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). CI runs tests natively on macOS ARM64, Linux AMD64, and Windows AMD64. The project-owned release-assets workflow tests the tagged source on all three platforms before cross-compiling the executables with `CGO_ENABLED=0` and attaching them with SHA-256 checksums.
+Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). CI runs tests natively on macOS ARM64, Linux AMD64, and Windows AMD64. The project-owned release-assets workflow tests the tagged source on all three platforms before [GoReleaser](https://goreleaser.com/) builds and publishes exactly the three platform-named executables configured in [`.goreleaser.yaml`](.goreleaser.yaml).
+
+Validate the release configuration and build all release artifacts locally without publishing:
+
+```bash
+goreleaser check
+goreleaser release --snapshot --clean
+```
 
 The generated release workflows require GitHub App credentials in the `release-please` environment: `vars.APP_CLIENT_ID` and `secrets.APP_PRIVATE_KEY`.
 
