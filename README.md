@@ -50,7 +50,7 @@ Alternatively, build it with Go 1.26 or newer:
 go install github.com/liblaf/swarmfolio/cmd/swarmfolio@latest
 ```
 
-Swarmfolio targets qBittorrent 5.2 or newer and authenticates WebUI requests with a Bearer API key.
+Swarmfolio targets qBittorrent 5.2 or newer. By default it connects to `http://localhost:8080` without authentication; a Bearer API key is optional.
 
 ## ⚙️ Configuration
 
@@ -69,24 +69,39 @@ Edit the file at the printed path. The default location is:
 | macOS | `~/Library/Application Support/swarmfolio/config.toml` |
 | Windows | `%AppData%\swarmfolio\config.toml` |
 
-The generated private file contains only the three required values:
+The generated private file requires only your M-Team API key:
 
 ```toml
 [mteam]
-api_key = "replace-me"
-
-[qbittorrent]
-base_url = "http://127.0.0.1:8080"
-api_key = "replace-me"
+api-key = "replace-me"
 ```
 
-Everything else has an application default: category `swarmfolio`, no hard byte ceiling, at least 25% of the download disk free, and at most two additions and four removals per hourly run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected.
+Everything else has an application default: qBittorrent at `http://localhost:8080` without authentication, category `swarmfolio`, no hard byte ceiling, at least **1 TiB free** on the download filesystem, and at most two additions and four removals per run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected. Existing `api_key` entries remain supported; use only one spelling per section.
 
-The disk limit accounts for both current free space and every unfinished byte already promised to qBittorrent. For local qBittorrent, Swarmfolio probes the configured category's save path. Set `portfolio.disk_path` to the host-visible mount for a container. For a remote host, `portfolio.disk_capacity` can use qBittorrent's reported free space only when the category and default save paths are identical; otherwise run Swarmfolio where it can probe the category filesystem.
+For a different WebUI address or authenticated access, add:
+
+```toml
+[qbittorrent]
+base_url = "http://localhost:8080"
+api-key = "your-qbittorrent-api-key" # Omit when authentication is not required.
+```
+
+The disk limit uses qBittorrent's reported free space and subtracts every unfinished byte already promised to qBittorrent before reserving 1 TiB (1,099,511,627,776 bytes). Total disk capacity and Docker access are not needed. By default, the managed category must be within qBittorrent's default save path and share its filesystem, such as `/downloads/.swarmfolio` under `/downloads`.
+
+For a category on another filesystem, including a separate mount nested under the default path, set `portfolio.disk_path` to a host-visible path on that filesystem. To override the fixed reserve, use:
+
+```toml
+[portfolio]
+minimum_free = "1 TiB"
+```
+
+`minimum-free` is also accepted; use only one spelling. The former `minimum_free_percent` and `disk_capacity` settings are no longer supported.
+
+If the reserve is already exhausted and no safe replacement plan fits, the run reports an error. Swarmfolio replaces only eligible managed torrents; it does not delete unrelated data to restore free space.
 
 Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte. Do not place user-managed torrents in this category.
 
-In qBittorrent 5.2 or newer, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api_key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
+For the minimal configuration, qBittorrent must already allow unauthenticated access from Swarmfolio's connection. If authentication is required, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api-key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
 
 Test the complete read-only path before enabling mutations:
 
@@ -110,10 +125,10 @@ The executable embeds [`swarmfolio.service`](https://github.com/liblaf/swarmfoli
 
 ```bash
 swarmfolio systemd install
-systemctl --user daemon-reload
-systemctl --user enable --now swarmfolio.timer
 systemctl --user list-timers swarmfolio.timer
 ```
+
+`systemd install` writes the embedded units, reloads the user systemd manager, and enables and starts `swarmfolio.timer`. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried.
 
 The timer is persistent and adds up to five minutes of jitter. Run `loginctl enable-linger "$USER"` if it must execute while the user is logged out.
 

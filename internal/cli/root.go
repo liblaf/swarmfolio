@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -201,9 +204,9 @@ func (o *options) systemdCommand() *cobra.Command {
 	var force bool
 	install := &cobra.Command{
 		Use:   "install",
-		Short: "Install the embedded units under $XDG_CONFIG_HOME/systemd/user",
+		Short: "Install user units and enable and start the hourly timer",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(command *cobra.Command, _ []string) error {
 			dir, err := os.UserConfigDir()
 			if err != nil {
 				return fmt.Errorf("resolve XDG config directory: %w", err)
@@ -214,17 +217,44 @@ func (o *options) systemdCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := writeFile(filepath.Join(dir, name), data, 0o644, force); err != nil {
+				if err := writeUnitFile(filepath.Join(dir, name), data, force); err != nil {
 					return err
 				}
 			}
-			_, err = fmt.Fprintf(o.stdout, "Installed user units in %s\nRun: systemctl --user daemon-reload && systemctl --user enable --now swarmfolio.timer\n", dir)
+			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "daemon-reload"); err != nil {
+				return err
+			}
+			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "enable", "--now", "swarmfolio.timer"); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(o.stdout, "Installed and enabled user timer in %s\n", dir)
 			return err
 		},
 	}
 	install.Flags().BoolVar(&force, "force", false, "replace existing unit files")
 	command.AddCommand(install)
 	return command
+}
+
+func writeUnitFile(path string, data []byte, force bool) error {
+	existing, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read %q: %w", path, err)
+	}
+	return writeFile(path, data, 0o644, force)
+}
+
+func runSystemctl(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+	command := exec.CommandContext(ctx, "systemctl", append([]string{"--user"}, args...)...)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("systemctl --user %s: %w", strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
@@ -261,9 +291,8 @@ func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
 
 func writeReport(writer io.Writer, report app.Report) {
 	fmt.Fprintf(writer, "Mode: %s\n", report.Mode)
-	fmt.Fprintf(writer, "Download disk: %s free of %s; reserve %s (%.1f%%)\n",
-		formatBytes(report.Budget.FreeBytes), formatBytes(report.Budget.CapacityBytes),
-		formatBytes(report.Budget.RequiredFreeBytes), report.Budget.MinimumFreePercent)
+	fmt.Fprintf(writer, "Download disk: %s free; reserve %s\n",
+		formatBytes(report.Budget.FreeBytes), formatBytes(report.Budget.RequiredFreeBytes))
 	fmt.Fprintf(writer, "Portfolio: %s now; %s limit; %s projected\n",
 		formatBytes(report.Budget.UsedBytes), formatBytes(report.Budget.LimitBytes), formatBytes(report.ProjectedUsedBytes))
 	for _, recovery := range report.Recoveries {

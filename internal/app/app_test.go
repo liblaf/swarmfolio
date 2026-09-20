@@ -29,7 +29,7 @@ func TestExecutePlansWithoutMutating(t *testing.T) {
 	if qbt.mutations != 0 || mt.downloads != 0 {
 		t.Fatalf("read-only plan mutated qBittorrent=%d or downloaded tokens=%d", qbt.mutations, mt.downloads)
 	}
-	if report.Budget.MinimumFreePercent != 25 || report.Budget.LimitBytes != 75 {
+	if report.Budget.RequiredFreeBytes != 25 || report.Budget.LimitBytes != 75 {
 		t.Fatalf("budget = %#v", report.Budget)
 	}
 }
@@ -205,13 +205,93 @@ func TestExecuteRefusesRollbackAfterAdditionLeavesCategory(t *testing.T) {
 
 func TestAccountCountsOffPathOutstandingBytes(t *testing.T) {
 	t.Parallel()
-	r := Runner{}
+	r := Runner{Config: config.Settings{QBittorrent: config.QBittorrent{Category: "swarmfolio"}}}
 	used, outstanding, err := r.account([]qbittorrent.Torrent{
-		{Hash: "inside", Size: 50, AmountLeft: 0, SavePath: "/downloads/inside"},
+		{Hash: "inside", Size: 50, AmountLeft: 0, SavePath: "/downloads/inside", Category: "swarmfolio"},
+		{Hash: "shared", Size: 20, AmountLeft: 10, SavePath: "/downloads/shared", Category: "user-managed"},
 		{Hash: "outside", Size: 20, AmountLeft: 20, SavePath: "/other/outside"},
 	}, "/downloads")
-	if err != nil || used != 50 || outstanding != 20 {
+	if err != nil || used != 50 || outstanding != 30 {
 		t.Fatalf("used=%d outstanding=%d err=%v", used, outstanding, err)
+	}
+}
+
+func TestExecuteReservesSpaceWhenOtherCategoriesShareSavePath(t *testing.T) {
+	t.Parallel()
+	for _, apply := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plan", true: "apply"}[apply], func(t *testing.T) {
+			t.Parallel()
+			qbt, mt := testServices(t)
+			qbt.torrents[0].Size = 40
+			qbt.torrents[0].AddedOn = appNow // Too recent to replace.
+			unmanaged := qbt.torrents[0]
+			unmanaged.Hash, unmanaged.Category, unmanaged.Size = "user", "user-managed", 30
+			qbt.torrents = append(qbt.torrents, unmanaged)
+			report, err := testRunner(qbt, mt).Execute(context.Background(), apply)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Only 5 of the 30 free bytes can be spent. The 30-byte candidate
+			// must not use the other category's data as portfolio headroom.
+			if report.Budget.UsedBytes != 40 || report.Budget.LimitBytes != 45 || len(report.Actions) != 0 ||
+				qbt.mutations != 0 || mt.downloads != 0 || qbt.free() < 25 {
+				t.Fatalf("unsafe shared-path plan: report=%#v events=%v", report, qbt.events)
+			}
+		})
+	}
+}
+
+func TestExecuteReportsUnrecoverableReserveDeficit(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		category   string
+		size       int64
+		amountLeft int64
+	}{
+		{name: "no replacement candidates", category: "swarmfolio", size: 80},
+		{name: "zero budget", category: "user-managed", size: 90},
+		{name: "outstanding downloads exhaust reserve", category: "user-managed", size: 90, amountLeft: 20},
+	} {
+		for _, apply := range []bool{false, true} {
+			t.Run(test.name+"/"+map[bool]string{false: "plan", true: "apply"}[apply], func(t *testing.T) {
+				t.Parallel()
+				qbt, mt := testServices(t)
+				qbt.torrents[0].Category, qbt.torrents[0].Size = test.category, test.size
+				qbt.torrents[0].AmountLeft = test.amountLeft
+				mt.results = nil
+				_, err := testRunner(qbt, mt).Execute(context.Background(), apply)
+				if err == nil || !strings.Contains(err.Error(), "preserv") {
+					t.Fatalf("reserve deficit was not reported: %v", err)
+				}
+				if qbt.mutations != 0 || mt.downloads != 0 {
+					t.Fatalf("infeasible plan caused mutations: events=%v downloads=%d", qbt.events, mt.downloads)
+				}
+			})
+		}
+	}
+}
+
+func TestExecuteDetectsReserveLostAfterEmptyPlan(t *testing.T) {
+	t.Parallel()
+	qbt, mt := testServices(t)
+	qbt.torrents, mt.results = nil, nil
+	runner := testRunner(qbt, mt)
+	probes := 0
+	runner.ProbeDisk = func(string) (disk.Space, error) {
+		probes++
+		free := int64(100)
+		if probes > 1 {
+			free = 20 // Other filesystem users exhausted the reserve during planning.
+		}
+		return disk.Space{CapacityBytes: 100, FreeBytes: free}, nil
+	}
+	_, err := runner.Execute(context.Background(), true)
+	if err == nil || !strings.Contains(err.Error(), "final category disk cannot preserve") {
+		t.Fatalf("final reserve deficit was not reported: %v", err)
+	}
+	if qbt.mutations != 0 || mt.downloads != 0 {
+		t.Fatalf("empty plan caused mutations: events=%v downloads=%d", qbt.events, mt.downloads)
 	}
 }
 
@@ -238,15 +318,71 @@ func TestRemoteSavePathsDoNotUseClientPlatformRules(t *testing.T) {
 	}
 }
 
-func TestExecuteRejectsRemoteBudgetForDifferentCategoryFilesystem(t *testing.T) {
+func TestExecuteRejectsAPIBudgetOutsideDefaultSavePath(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
 	runner := testRunner(qbt, mt)
 	runner.Config.Portfolio.DiskPath = ""
-	runner.Config.Portfolio.DiskCapacityBytes = 100
+	qbt.categoryPath = "/other-filesystem/swarmfolio"
 	_, err := runner.Execute(context.Background(), false)
-	if err == nil || !strings.Contains(err.Error(), "paths to match") {
+	if err == nil || !strings.Contains(err.Error(), "within the default save path") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestExecuteUsesAPIFreeSpaceWithOneTiBReserve(t *testing.T) {
+	t.Parallel()
+	const reserve = int64(1 << 40)
+	for _, test := range []struct {
+		name        string
+		free        int64
+		outstanding int64
+		wantActions int
+		wantError   bool
+	}{
+		{name: "below reserve", free: reserve - 1, wantError: true},
+		{name: "exact reserve", free: reserve},
+		{name: "one byte short of candidate", free: reserve + 29},
+		{name: "candidate fits exactly", free: reserve + 30, wantActions: 1},
+		{name: "outstanding bytes consume headroom", free: reserve + 30, outstanding: 10},
+		{name: "candidate and outstanding fit", free: reserve + 40, outstanding: 10, wantActions: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			qbt, mt := testServices(t)
+			qbt.torrents = nil
+			if test.outstanding > 0 {
+				qbt.torrents = []qbittorrent.Torrent{{
+					Hash: "unmanaged", Name: "other", Size: test.outstanding, AmountLeft: test.outstanding,
+					AddedOn: appNow, SavePath: "/downloads/user", State: "downloading", Category: "user-managed",
+				}}
+			}
+			queried := false
+			qbt.freeSpace = func() (int64, error) {
+				queried = true
+				return test.free, nil
+			}
+			runner := testRunner(qbt, mt)
+			settings, err := config.Parse([]byte("[mteam]\napi-key = \"test-key\"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.Config = settings
+			runner.ProbeDisk = func(string) (disk.Space, error) {
+				t.Fatal("API budget unexpectedly probed the host filesystem")
+				return disk.Space{}, nil
+			}
+			report, err := runner.Execute(context.Background(), false)
+			if (err != nil) != test.wantError {
+				t.Fatalf("Execute() error = %v, want error = %v", err, test.wantError)
+			}
+			if !queried || report.Budget.FreeBytes != test.free || report.Budget.RequiredFreeBytes != reserve || len(report.Actions) != test.wantActions {
+				t.Fatalf("unexpected API budget: queried=%v report=%#v", queried, report)
+			}
+			if qbt.mutations != 0 || mt.downloads != 0 {
+				t.Fatalf("read-only plan caused mutations: events=%v downloads=%d", qbt.events, mt.downloads)
+			}
+		})
 	}
 }
 
@@ -402,7 +538,7 @@ func pendingQBT(hash string) *fakeQBT {
 func testRunner(qbt *fakeQBT, mt *fakeMTeam) Runner {
 	return Runner{
 		Config: config.Settings{
-			Portfolio:   config.Portfolio{MinimumFreePercent: 25, DiskPath: "/host/downloads"},
+			Portfolio:   config.Portfolio{MinimumFreeBytes: 25, DiskPath: "/host/downloads"},
 			QBittorrent: config.QBittorrent{Category: "swarmfolio"},
 			Policy: config.Policy{
 				CandidateMaxAge: 24 * time.Hour, MinimumFreeleechRemaining: time.Hour,
@@ -454,6 +590,7 @@ type fakeQBT struct {
 	preallocate  bool
 	addSavePath  string
 	onAdd        func(*fakeQBT)
+	freeSpace    func() (int64, error)
 	events       []string
 	mutations    int
 }
@@ -466,8 +603,13 @@ func (q *fakeQBT) CategorySavePath(context.Context, string) (string, error) {
 	return q.categoryPath, nil
 }
 func (q *fakeQBT) DefaultSavePath(context.Context) (string, error) { return q.defaultPath, nil }
-func (q *fakeQBT) FreeSpace(context.Context) (int64, error)        { return q.free(), nil }
-func (q *fakeQBT) PreallocateAll(context.Context) (bool, error)    { return q.preallocate, nil }
+func (q *fakeQBT) FreeSpace(context.Context) (int64, error) {
+	if q.freeSpace != nil {
+		return q.freeSpace()
+	}
+	return q.free(), nil
+}
+func (q *fakeQBT) PreallocateAll(context.Context) (bool, error) { return q.preallocate, nil }
 func (q *fakeQBT) Add(_ context.Context, request qbittorrent.AddRequest) error {
 	q.events = append(q.events, "add")
 	q.mutations++

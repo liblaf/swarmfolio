@@ -45,8 +45,7 @@ func TestLoadRequiresPrivateRegularConfig(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.toml")
-	validConfig := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
-	validConfig = strings.Replace(validConfig, `api_key = ""`, `api_key = "qbt-secret"`, 1)
+	validConfig := strings.Replace(Example, `api-key = ""`, `api-key = "mteam-secret"`, 1)
 	if err := os.WriteFile(valid, []byte(validConfig), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +120,7 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
-func TestParseRejectsUnknownAndMissingCredentials(t *testing.T) {
+func TestParseRejectsUnknownAndMissingMTeamCredential(t *testing.T) {
 	t.Parallel()
 	if _, err := Parse([]byte("unknown = true\n")); err == nil {
 		t.Fatal("Parse() accepted an unknown field")
@@ -134,8 +133,11 @@ func TestParseRejectsUnknownAndMissingCredentials(t *testing.T) {
 func TestParseRejectsLegacyQBittorrentCredentials(t *testing.T) {
 	t.Parallel()
 	for _, field := range []string{`username = "admin"`, `password = "secret"`} {
-		config := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
-		config = strings.Replace(config, `api_key = ""`, `api_key = "qbt-secret"`+"\n"+field, 1)
+		config := `[mteam]
+api-key = "mteam-secret"
+[qbittorrent]
+api_key = "qbt-secret"
+` + field + "\n"
 		if _, err := Parse([]byte(config)); err == nil {
 			t.Fatalf("Parse() accepted legacy qBittorrent field %q", field)
 		}
@@ -150,16 +152,21 @@ func TestEnvironmentCannotReplaceConfigCredentials(t *testing.T) {
 	}
 }
 
-func TestParseRequiresCredentialsInTOML(t *testing.T) {
+func TestParseMinimalConfig(t *testing.T) {
 	t.Parallel()
-	minimal := strings.Replace(Example, `api_key = ""`, `api_key = "mteam-secret"`, 1)
-	minimal = strings.Replace(minimal, `api_key = ""`, `api_key = "qbt-secret"`, 1)
+	minimal := strings.Replace(Example, `api-key = ""`, `api-key = "mteam-secret"`, 1)
 	settings, err := Parse([]byte(minimal))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.MTeam.APIKey != "mteam-secret" || settings.QBittorrent.APIKey != "qbt-secret" {
-		t.Fatal("Parse() did not retain TOML credentials")
+	if settings.MTeam.APIKey != "mteam-secret" {
+		t.Fatal("Parse() did not retain the M-Team API key")
+	}
+	if settings.QBittorrent.BaseURL != "http://localhost:8080" || settings.QBittorrent.APIKey != "" {
+		t.Fatalf("unexpected qBittorrent defaults: %#v", settings.QBittorrent)
+	}
+	if settings.Portfolio.MinimumFreeBytes != 1<<40 {
+		t.Fatalf("minimum free bytes = %d, want %d", settings.Portfolio.MinimumFreeBytes, int64(1<<40))
 	}
 	if strings.Contains(Example, "version =") || strings.Contains(Example, "[policy]") || strings.Contains(Example, "[portfolio]") || strings.Contains(Example, "[http]") {
 		t.Fatalf("Example contains optional settings:\n%s", Example)
@@ -171,9 +178,71 @@ func TestParseRequiresCredentialsInTOML(t *testing.T) {
 			assignments = append(assignments, line)
 		}
 	}
-	want := []string{`api_key = ""`, `base_url = "http://127.0.0.1:8080"`, `api_key = ""`}
+	want := []string{`api-key = ""`}
 	if strings.Join(assignments, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("Example assignments = %q, want exactly %q", assignments, want)
+	}
+}
+
+func TestParseAcceptsMTeamAPIKeySpellings(t *testing.T) {
+	t.Parallel()
+	for name, key := range map[string]string{
+		"preferred kebab case":  "api-key",
+		"compatible snake case": "api_key",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			settings, err := Parse([]byte("[mteam]\n" + key + " = \"mteam-secret\"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.MTeam.APIKey != "mteam-secret" {
+				t.Fatalf("API key = %q, want %q", settings.MTeam.APIKey, "mteam-secret")
+			}
+		})
+	}
+}
+
+func TestParseRejectsConflictingMTeamAPIKeySpellings(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte(`[mteam]
+api-key = "preferred"
+api_key = "compatible"
+`))
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Parse() error = %v, want alias conflict", err)
+	}
+}
+
+func TestParseAcceptsQBittorrentAPIKeySpellings(t *testing.T) {
+	t.Parallel()
+	for name, key := range map[string]string{
+		"kebab case": "api-key",
+		"snake case": "api_key",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			settings, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[qbittorrent]\n" + key + " = \"qbt-secret\"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.QBittorrent.APIKey != "qbt-secret" {
+				t.Fatalf("API key = %q, want %q", settings.QBittorrent.APIKey, "qbt-secret")
+			}
+		})
+	}
+}
+
+func TestParseRejectsConflictingQBittorrentAPIKeySpellings(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte(`[mteam]
+api-key = "mteam-secret"
+[qbittorrent]
+api-key = "preferred"
+api_key = "compatible"
+`))
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Parse() error = %v, want alias conflict", err)
 	}
 }
 
@@ -182,9 +251,6 @@ func TestParseAppliesDocumentedDefaults(t *testing.T) {
 	minimal := `
 [mteam]
 api_key = "mteam-secret"
-[qbittorrent]
-base_url = "http://localhost:8080"
-api_key = "qbt-secret"
 `
 	settings, err := Parse([]byte(minimal))
 	if err != nil {
@@ -193,7 +259,8 @@ api_key = "qbt-secret"
 	if settings.QBittorrent.Category != "swarmfolio" {
 		t.Fatalf("category = %q, want %q", settings.QBittorrent.Category, "swarmfolio")
 	}
-	if settings.Portfolio.MinimumFreePercent != 25 || settings.MTeam.BaseURL != "https://api.m-team.cc" ||
+	if settings.Portfolio.MinimumFreeBytes != 1<<40 || settings.MTeam.BaseURL != "https://api.m-team.cc" ||
+		settings.QBittorrent.BaseURL != "http://localhost:8080" || settings.QBittorrent.APIKey != "" ||
 		settings.MTeam.Mode != "normal" || settings.MTeam.PageSize != 100 || settings.MTeam.Pages != 1 ||
 		settings.MTeam.Location.String() != "Asia/Shanghai" || settings.HTTPTimeout.String() != "30s" {
 		t.Fatalf("unexpected defaults: %#v", settings)
@@ -203,6 +270,55 @@ api_key = "qbt-secret"
 		settings.Policy.MinimumResidency.String() != "24h0m0s" || settings.Policy.MinimumIdle.String() != "6h0m0s" ||
 		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 {
 		t.Fatalf("unexpected policy defaults: %#v", settings.Policy)
+	}
+}
+
+func TestParseAcceptsMinimumFreeSpellings(t *testing.T) {
+	t.Parallel()
+	for name, key := range map[string]string{
+		"preferred snake case":  "minimum_free",
+		"compatible kebab case": "minimum-free",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			settings, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[portfolio]\n" + key + " = \"2 TiB\"\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.Portfolio.MinimumFreeBytes != 2<<40 {
+				t.Fatalf("minimum free bytes = %d, want %d", settings.Portfolio.MinimumFreeBytes, int64(2<<40))
+			}
+		})
+	}
+}
+
+func TestParseRejectsConflictingMinimumFreeSpellings(t *testing.T) {
+	t.Parallel()
+	_, err := Parse([]byte(`[mteam]
+api-key = "mteam-secret"
+[portfolio]
+minimum_free = "1 TiB"
+minimum-free = "2 TiB"
+`))
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("Parse() error = %v, want alias conflict", err)
+	}
+}
+
+func TestParseRejectsObsoletePortfolioSettings(t *testing.T) {
+	t.Parallel()
+	for _, setting := range []string{
+		"minimum_free_percent = 25",
+		`disk_capacity = "2 TiB"`,
+	} {
+		setting := setting
+		t.Run(setting, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[portfolio]\n" + setting + "\n"))
+			if err == nil {
+				t.Fatalf("Parse() accepted obsolete portfolio setting %q", setting)
+			}
+		})
 	}
 }
 
