@@ -215,6 +215,29 @@ func TestAccountCountsOffPathOutstandingBytes(t *testing.T) {
 	}
 }
 
+func TestRemoteSavePathsDoNotUseClientPlatformRules(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, root, child string
+		want              bool
+	}{
+		{"unix descendant", "/downloads/freeleech", "/downloads/freeleech/new", true},
+		{"unix sibling", "/downloads/freeleech", "/downloads/freeleech-old/new", false},
+		{"windows descendant", `C:\\Downloads\\Freeleech`, `c:/downloads/freeleech/new`, true},
+		{"windows sibling", `C:\\Downloads\\Freeleech`, `C:\\Downloads\\Freeleech-old\\new`, false},
+		{"windows drive root", `C:\\`, `C:\\Downloads\\new`, true},
+		{"different path families", "/downloads", `C:\\Downloads`, false},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := within(test.root, test.child); got != test.want {
+				t.Fatalf("within(%q, %q) = %v, want %v", test.root, test.child, got, test.want)
+			}
+		})
+	}
+}
+
 func TestExecuteRejectsRemoteBudgetForDifferentCategoryFilesystem(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)

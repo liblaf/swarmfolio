@@ -3,11 +3,30 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
-func TestDefaultPathUsesXDGConfigHome(t *testing.T) {
+func TestDefaultPathUsesUserConfigDirectory(t *testing.T) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "swarmfolio", "config.toml")
+	if path != want {
+		t.Fatalf("DefaultPath() = %q, want %q", path, want)
+	}
+}
+
+func TestDefaultPathUsesXDGConfigHomeOnLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CONFIG_HOME is a Linux convention")
+	}
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	path, err := DefaultPath()
 	if err != nil {
@@ -20,6 +39,9 @@ func TestDefaultPathUsesXDGConfigHome(t *testing.T) {
 }
 
 func TestLoadRequiresPrivateRegularConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACL coverage is in permissions_windows_test.go")
+	}
 	t.Parallel()
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "valid.toml")

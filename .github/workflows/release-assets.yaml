@@ -14,34 +14,91 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
 jobs:
-  executable:
-    name: Linux executable
-    runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: 0
-      GOARCH: amd64
-      GOOS: linux
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  test:
+    name: Test (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin/arm64
+            runner: macos-15
+          - target: linux/amd64
+            runner: ubuntu-latest
+          - target: windows/amd64
+            runner: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ env.TAG }}
       - name: Set up Go
-        uses: actions/setup-go@c0137caad775660c0844396c52da96e560aba63d # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
           cache: true
+      - name: Verify native target
+        run: test "$(go env GOOS)/$(go env GOARCH)" = "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Test
-        run: go test ./...
-      - name: Build static executable
-        run: >-
-          go build -trimpath
-          -ldflags "-s -w -X github.com/liblaf/swarmfolio/internal/buildinfo.Version=${TAG}"
-          -o dist/swarmfolio
-          ./cmd/swarmfolio
-      - name: Upload executable
-        run: gh release upload "$TAG" dist/swarmfolio --clobber
+        run: go test -race ./...
+      - name: Build and smoke test
+        run: |
+          go build -trimpath -o "dist/swarmfolio${EXE}" ./cmd/swarmfolio
+          "./dist/swarmfolio${EXE}" --version
+        env:
+          CGO_ENABLED: 0
+          EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
+
+  executables:
+    name: Release executables
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.TAG }}
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build executables
+        run: |
+          for target in darwin/arm64 linux/amd64 windows/amd64; do
+            export GOOS="${target%/*}" GOARCH="${target#*/}"
+            executable="swarmfolio-${GOOS}-${GOARCH}"
+            if [ "$GOOS" = windows ]; then
+              executable="${executable}.exe"
+            fi
+            go build -trimpath \
+              -ldflags "-s -w -X github.com/liblaf/swarmfolio/internal/buildinfo.Version=${TAG}" \
+              -o "dist/${executable}" ./cmd/swarmfolio
+          done
+          # Preserve the original Linux asset name for existing installers.
+          cp dist/swarmfolio-linux-amd64 dist/swarmfolio
+          test "$(./dist/swarmfolio --version)" = "swarmfolio version ${TAG}"
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum swarmfolio* > SHA256SUMS
+      - name: Upload executables and checksums
+        run: gh release upload "$TAG" dist/* --clobber
         env:
           GH_TOKEN: ${{ github.token }}

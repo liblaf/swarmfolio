@@ -148,8 +148,8 @@ func Load(path string) (Settings, error) {
 	if !info.Mode().IsRegular() {
 		return Settings{}, fmt.Errorf("config %q must be a regular file", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return Settings{}, fmt.Errorf("config %q contains credentials and must not be accessible by group or others (mode %04o)", path, info.Mode().Perm())
+	if err := checkConfigPermissions(file, info); err != nil {
+		return Settings{}, err
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {

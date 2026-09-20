@@ -1,19 +1,12 @@
-//go:build linux
+//go:build linux || darwin
 
-// Package disk reports capacity for the filesystem that qBittorrent writes to.
 package disk
 
 import (
 	"errors"
 	"fmt"
-	"math"
 	"syscall"
 )
-
-type Space struct {
-	CapacityBytes int64
-	FreeBytes     int64
-}
 
 func Probe(path string) (Space, error) {
 	if path == "" {
@@ -32,11 +25,4 @@ func Probe(path string) (Space, error) {
 		return Space{}, fmt.Errorf("disk: free space for %q: %w", path, err)
 	}
 	return Space{CapacityBytes: capacity, FreeBytes: free}, nil
-}
-
-func multiply(blocks, blockSize uint64) (int64, error) {
-	if blockSize != 0 && blocks > math.MaxInt64/blockSize {
-		return 0, errors.New("byte count overflows int64")
-	}
-	return int64(blocks * blockSize), nil
 }

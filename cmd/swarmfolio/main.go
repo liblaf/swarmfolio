@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"syscall"
 	_ "time/tzdata"
 
 	"github.com/liblaf/swarmfolio/internal/cli"
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), shutdownSignals()...)
 	defer cancel()
 	command := cli.New(os.Stdout, os.Stderr)
 	if err := command.ExecuteContext(ctx); err != nil {
