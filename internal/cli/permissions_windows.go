@@ -39,7 +39,9 @@ func setFilePermissions(file *os.File, mode os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("build config access control list: %w", err)
 	}
-	if err := windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+	// os.OpenFile does not request WRITE_DAC or WRITE_OWNER on its handle.
+	// Open the security descriptor by name to obtain those access rights.
+	if err := windows.SetNamedSecurityInfo(file.Name(), windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		user.User.Sid, nil, acl, nil); err != nil {
 		return fmt.Errorf("set access control for %q: %w", file.Name(), err)
