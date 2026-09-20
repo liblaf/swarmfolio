@@ -21,12 +21,22 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 - The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
 - New torrents are added stopped before any old data is removed. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
-- Applied runs use an XDG runtime lock, so two Swarmfolio processes cannot delete from the same portfolio concurrently.
+- Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently.
 - Candidate API responses, disk accounting, torrent metadata, and state changes are validated; unexpected state stops the run visibly.
 
 ## 📦 Installation
 
-The GitHub Release contains one static Linux AMD64 executable:
+GitHub Releases provide standalone executables for these targets:
+
+| Target | Release asset |
+| --- | --- |
+| macOS Apple Silicon (`darwin/arm64`) | `swarmfolio-darwin-arm64` |
+| Linux x86-64 (`linux/amd64`) | `swarmfolio-linux-amd64` |
+| Windows x86-64 (`windows/amd64`) | `swarmfolio-windows-amd64.exe` |
+
+Download the matching asset from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), rename it to `swarmfolio` (or `swarmfolio.exe` on Windows), and place it on your `PATH`. On macOS and Linux, make it executable with `chmod +x swarmfolio`. Each release includes `SHA256SUMS` for verifying downloads.
+
+The original `swarmfolio` asset remains a copy of the Linux AMD64 executable, so existing installations can continue using:
 
 ```bash
 install -d ~/.local/bin
@@ -44,14 +54,22 @@ Swarmfolio targets qBittorrent 5.2 or newer and authenticates WebUI requests wit
 
 ## ⚙️ Configuration
 
-Create `${XDG_CONFIG_HOME:-$HOME/.config}/swarmfolio/config.toml`:
+Create the configuration file with:
 
 ```bash
 swarmfolio config init
-${EDITOR:-vi} "$(swarmfolio config path)"
+swarmfolio config path
 ```
 
-The generated mode-`0600` file contains only the three required values:
+Edit the file at the printed path. The default location is:
+
+| Platform | Configuration file |
+| --- | --- |
+| Linux | `${XDG_CONFIG_HOME:-$HOME/.config}/swarmfolio/config.toml` |
+| macOS | `~/Library/Application Support/swarmfolio/config.toml` |
+| Windows | `%AppData%\swarmfolio\config.toml` |
+
+The generated private file contains only the three required values:
 
 ```toml
 [mteam]
@@ -86,7 +104,7 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
 swarmfolio completion fish >"${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/swarmfolio.fish"
 ```
 
-## ⏱️ Hourly User Timer
+## ⏱️ Hourly User Timer (Linux)
 
 The executable embeds [`swarmfolio.service`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.service) and [`swarmfolio.timer`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.timer). Install the user units and start the hourly timer with:
 
@@ -113,7 +131,7 @@ go vet ./...
 go build ./cmd/swarmfolio
 ```
 
-Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). The project-owned release-assets workflow tests the tagged source and attaches the single `swarmfolio` executable.
+Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). CI runs tests natively on macOS ARM64, Linux AMD64, and Windows AMD64. The project-owned release-assets workflow tests the tagged source on all three platforms before cross-compiling the executables with `CGO_ENABLED=0` and attaching them with SHA-256 checksums.
 
 The generated release workflows require GitHub App credentials in the `release-please` environment: `vars.APP_CLIENT_ID` and `secrets.APP_PRIVATE_KEY`.
 

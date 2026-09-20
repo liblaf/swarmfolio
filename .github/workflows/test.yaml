@@ -11,8 +11,21 @@ permissions:
 
 jobs:
   test:
-    name: Go
-    runs-on: ubuntu-latest
+    name: Go (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin/arm64
+            runner: macos-15
+          - target: linux/amd64
+            runner: ubuntu-latest
+          - target: windows/amd64
+            runner: windows-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -22,7 +35,12 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: test -z "$(gofmt -l .)"
+      - name: Verify native target
+        run: test "$(go env GOOS)/$(go env GOARCH)" = "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Vet
         run: go vet ./...
       - name: Test

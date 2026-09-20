@@ -1,6 +1,5 @@
-//go:build linux
+//go:build windows
 
-// Package lock serializes applied Swarmfolio runs without storing decisions.
 package lock
 
 import (
@@ -8,17 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
-type Lock struct {
-	file *os.File
-}
-
 func Acquire() (*Lock, error) {
-	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
-	if runtimeDir == "" || !filepath.IsAbs(runtimeDir) {
-		return nil, errors.New("XDG_RUNTIME_DIR must be set to an absolute path for an applied run")
+	runtimeDir, err := os.UserCacheDir()
+	if err != nil {
+		return nil, fmt.Errorf("find user cache directory: %w", err)
 	}
 	dir := filepath.Join(runtimeDir, "swarmfolio")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -28,9 +24,9 @@ func Acquire() (*Lock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open run lock: %w", err)
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &windows.Overlapped{}); err != nil {
 		_ = file.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 			return nil, errors.New("another applied Swarmfolio run is already in progress")
 		}
 		return nil, fmt.Errorf("acquire run lock: %w", err)
@@ -42,7 +38,7 @@ func (lock *Lock) Close() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}
-	unlockErr := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN)
+	unlockErr := windows.UnlockFileEx(windows.Handle(lock.file.Fd()), 0, 1, 0, &windows.Overlapped{})
 	closeErr := lock.file.Close()
 	lock.file = nil
 	return errors.Join(unlockErr, closeErr)

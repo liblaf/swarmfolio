@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/spf13/cobra"
 
@@ -39,14 +40,16 @@ func New(stdout, stderr io.Writer) *cobra.Command {
 	}
 	command.SetOut(stdout)
 	command.SetErr(stderr)
-	command.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file (default: $XDG_CONFIG_HOME/swarmfolio/config.toml)")
+	command.PersistentFlags().StringVar(&options.configPath, "config", "", "configuration file (default: the user config directory / swarmfolio / config.toml)")
 	command.AddCommand(
 		options.runCommand(),
 		options.planCommand(),
 		options.configCommand(),
 		options.completionCommand(command),
-		options.systemdCommand(),
 	)
+	if runtime.GOOS == "linux" {
+		command.AddCommand(options.systemdCommand())
+	}
 	return command
 }
 
@@ -241,7 +244,7 @@ func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
 		}
 		return fmt.Errorf("create %q: %w", path, err)
 	}
-	if err := file.Chmod(mode); err != nil {
+	if err := setFilePermissions(file, mode); err != nil {
 		_ = file.Close()
 		return fmt.Errorf("set permissions on %q: %w", path, err)
 	}

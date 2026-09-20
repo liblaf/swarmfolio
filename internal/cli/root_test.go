@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestConfigPathAndInitUseXDG(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("XDG_CONFIG_HOME is a Linux convention")
+	}
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	var stdout, stderr bytes.Buffer
@@ -31,11 +35,13 @@ func TestConfigPathAndInitUseXDG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode = %o, want 600", info.Mode().Perm())
 	}
-	if err := os.Chmod(want, 0o644); err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(want, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	stdout.Reset()
 	command = New(&stdout, &stderr)
@@ -47,8 +53,25 @@ func TestConfigPathAndInitUseXDG(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("forced config mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestConfigPathUsesUserConfigDirectory(t *testing.T) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"config", "path"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "swarmfolio", "config.toml")
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("path output = %q, want %q", got, want)
 	}
 }
 
@@ -66,6 +89,7 @@ func TestFishCompletion(t *testing.T) {
 }
 
 func TestSystemdPrint(t *testing.T) {
+	requireLinux(t)
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	command := New(&stdout, &stderr)
@@ -79,6 +103,7 @@ func TestSystemdPrint(t *testing.T) {
 }
 
 func TestSystemdPrintServiceHasNoEnvironmentFile(t *testing.T) {
+	requireLinux(t)
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	command := New(&stdout, &stderr)
@@ -96,6 +121,7 @@ func TestSystemdPrintServiceHasNoEnvironmentFile(t *testing.T) {
 }
 
 func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {
+	requireLinux(t)
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	var stdout, stderr bytes.Buffer
@@ -113,5 +139,12 @@ func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {
 		if !strings.Contains(string(data), "[Unit]") {
 			t.Fatalf("installed %s is not a systemd unit: %q", name, data)
 		}
+	}
+}
+
+func requireLinux(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd commands are available only on Linux")
 	}
 }

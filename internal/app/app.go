@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path/filepath"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -193,7 +193,7 @@ func (r Runner) snapshot(ctx context.Context) (snapshot, error) {
 	if err != nil {
 		return snapshot{}, fmt.Errorf("resolve qBittorrent category %q save path: %w", r.Config.QBittorrent.Category, err)
 	}
-	if !filepath.IsAbs(targetPath) {
+	if !remotePathIsAbs(targetPath) {
 		return snapshot{}, fmt.Errorf("qBittorrent category %q save path must be absolute, got %q", r.Config.QBittorrent.Category, targetPath)
 	}
 	defaultPath := ""
@@ -210,7 +210,7 @@ func (r Runner) snapshot(ctx context.Context) (snapshot, error) {
 	}
 	var space disk.Space
 	if r.Config.Portfolio.DiskCapacityBytes > 0 {
-		if filepath.Clean(targetPath) != filepath.Clean(defaultPath) {
+		if !remotePathEqual(targetPath, defaultPath) {
 			return snapshot{}, errors.New("portfolio.disk_capacity requires the qBittorrent category and default save paths to match; use local portfolio.disk_path probing for another filesystem")
 		}
 		free, err := r.QBittorrent.FreeSpace(ctx)
@@ -674,9 +674,65 @@ func findHash(torrents []qbittorrent.Torrent, hash string) *qbittorrent.Torrent 
 }
 
 func within(root, child string) bool {
-	if root == "" || child == "" {
+	root, windowsRoot := cleanRemotePath(root)
+	child, windowsChild := cleanRemotePath(child)
+	if root == "" || child == "" || windowsRoot != windowsChild {
 		return false
 	}
-	relative, err := filepath.Rel(filepath.Clean(root), filepath.Clean(child))
-	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	if windowsRoot {
+		root, child = strings.ToLower(root), strings.ToLower(child)
+	}
+	if root == "/" {
+		return true
+	}
+	root = strings.TrimSuffix(root, "/")
+	return child == root || strings.HasPrefix(child, root+"/")
+}
+
+// remotePathIsAbs reports whether a qBittorrent path is absolute on either
+// supported qBittorrent host family. The client can run on a different OS than
+// qBittorrent, so filepath.IsAbs would apply the wrong platform's rules.
+func remotePathIsAbs(value string) bool {
+	cleaned, _ := cleanRemotePath(value)
+	return cleaned != ""
+}
+
+func remotePathEqual(left, right string) bool {
+	left, leftWindows := cleanRemotePath(left)
+	right, rightWindows := cleanRemotePath(right)
+	if left == "" || right == "" || leftWindows != rightWindows {
+		return false
+	}
+	if leftWindows {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+// cleanRemotePath normalizes an absolute qBittorrent save path without using
+// the client OS. qBittorrent may be remote, including a Windows host managed
+// from a Unix client or a Unix host managed from a Windows client.
+func cleanRemotePath(value string) (string, bool) {
+	if value == "" {
+		return "", false
+	}
+	if len(value) >= 3 && isDriveLetter(value[0]) && value[1] == ':' && (value[2] == '/' || value[2] == '\\') {
+		return strings.ToUpper(value[:1]) + ":" + path.Clean("/"+strings.ReplaceAll(value[2:], "\\", "/")), true
+	}
+	if strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, "//") {
+		cleaned := path.Clean("/" + strings.TrimLeft(strings.ReplaceAll(value, "\\", "/"), "/"))
+		parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
+		if len(parts) < 2 || parts[0] == "." || parts[1] == "." {
+			return "", true
+		}
+		return "//" + strings.Join(parts, "/"), true
+	}
+	if strings.HasPrefix(value, "/") {
+		return path.Clean(value), false
+	}
+	return "", false
+}
+
+func isDriveLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
