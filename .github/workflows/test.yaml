@@ -37,6 +37,12 @@ jobs:
       - name: Check formatting
         if: runner.os == 'Linux'
         run: test -z "$(gofmt -l .)"
+      - name: Check GoReleaser configuration
+        if: runner.os == 'Linux'
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        with:
+          version: "~> v2"
+          args: check
       - name: Verify native target
         run: test "$(go env GOOS)/$(go env GOARCH)" = "$TARGET"
         env:
