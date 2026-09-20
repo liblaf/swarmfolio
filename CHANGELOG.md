@@ -7,6 +7,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.0) - 2026-09-20
+
+### 💥 BREAKING CHANGES
+
+- Replace portfolio.minimum_free_percent with minimum_free
+(default "1 TiB") and remove portfolio.disk_capacity. Set disk_path when
+the category uses another filesystem. JSON budget reports no longer
+include capacity_bytes or minimum_free_percent; use required_free_bytes
+for the configured reserve. - [b483c1c](https://github.com/liblaf/swarmfolio/commit/b483c1c8e25d2b3906561f8fe8717cfbcc8bd6ee) by [@liblaf](https://github.com/liblaf)
+
+### ✨ Features
+
+- **\[breaking\]** simplify setup and reserve 1 TiB of free disk space - [b483c1c](https://github.com/liblaf/swarmfolio/commit/b483c1c8e25d2b3906561f8fe8717cfbcc8bd6ee) by [@liblaf](https://github.com/liblaf)
+
+### 🐛 Bug Fixes
+
+- **(systemd)** find swarmfolio through executable search paths - [35b3af5](https://github.com/liblaf/swarmfolio/commit/35b3af5a8c77fc19536b4324f8e8ba18176a8de1) by [@liblaf](https://github.com/liblaf)
+
+### 📝 Documentation
+
+- align minimum Go version with updated dependencies - [154ff9a](https://github.com/liblaf/swarmfolio/commit/154ff9a6c213eded3bf460882a8b3a5ff6d8e3d0) by [@liblaf](https://github.com/liblaf)
+
+### ⚙️ Continuous Integrations
+
+- publish platform binaries with GoReleaser - [41924e3](https://github.com/liblaf/swarmfolio/commit/41924e35d9ff1072cf6c169e1aa6481896e8aa96) by [@liblaf](https://github.com/liblaf)
+- package release binaries in compressed archives - [ccc7954](https://github.com/liblaf/swarmfolio/commit/ccc79542832191b862367ecd6953f41b675a320b) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.2.3](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.3) - 2026-09-20
 
 ### 🐛 Bug Fixes
@@ -19,6 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 - [@renovate[bot]](https://github.com/apps/renovate)
 
