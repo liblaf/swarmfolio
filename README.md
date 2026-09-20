@@ -36,12 +36,13 @@ GitHub Releases provide compressed archives for these targets:
 
 Download and extract the matching archive from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), then place the included `swarmfolio` (or `swarmfolio.exe` on Windows) on your `PATH`. The macOS and Linux archives preserve executable permissions.
 
-For Linux AMD64:
+For example, install a Linux AMD64 release into `~/.local/bin` and add it to your shell's search path:
 
 ```bash
 install -d ~/.local/bin
 gh release download --repo liblaf/swarmfolio --pattern swarmfolio-linux-amd64.tar.gz --clobber
 tar -xzf swarmfolio-linux-amd64.tar.gz -C ~/.local/bin swarmfolio
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Alternatively, build it with Go 1.26 or newer:
@@ -129,6 +130,8 @@ systemctl --user list-timers swarmfolio.timer
 ```
 
 `systemd install` writes the embedded units, reloads the user systemd manager, and enables and starts `swarmfolio.timer`. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried.
+
+The service runs `swarmfolio` by name, searching `~/.local/bin` and standard system binary directories. For another installation directory, extend `ExecSearchPath` in a drop-in with `systemctl --user edit swarmfolio.service`.
 
 The timer is persistent and adds up to five minutes of jitter. Run `loginctl enable-linger "$USER"` if it must execute while the user is logged out.
 

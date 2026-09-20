@@ -6,7 +6,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/swarmfolio run --apply
+ExecSearchPath=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=swarmfolio run --apply
 TimeoutStartSec=30m
 
 # The optimizer only needs its configuration and HTTP access to M-Team and qBittorrent.
