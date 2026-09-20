@@ -44,7 +44,7 @@ gh release download --repo liblaf/swarmfolio --pattern swarmfolio-linux-amd64 --
 chmod +x ~/.local/bin/swarmfolio
 ```
 
-Alternatively, build it with Go 1.25 or newer:
+Alternatively, build it with Go 1.26 or newer:
 
 ```bash
 go install github.com/liblaf/swarmfolio/cmd/swarmfolio@latest
