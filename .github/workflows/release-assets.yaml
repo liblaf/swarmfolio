@@ -64,8 +64,8 @@ jobs:
           CGO_ENABLED: 0
           EXE: ${{ runner.os == 'Windows' && '.exe' || '' }}
 
-  executables:
-    name: Release executables
+  archives:
+    name: Release archives
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -79,7 +79,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Publish executables with GoReleaser
+      - name: Publish archives with GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           version: "~> v2"

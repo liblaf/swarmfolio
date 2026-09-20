@@ -26,22 +26,22 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 
 ## 📦 Installation
 
-GitHub Releases provide standalone executables for these targets:
+GitHub Releases provide compressed archives for these targets:
 
 | Target | Release asset |
 | --- | --- |
-| macOS Apple Silicon (`darwin/arm64`) | `swarmfolio-darwin-arm64` |
-| Linux x86-64 (`linux/amd64`) | `swarmfolio-linux-amd64` |
-| Windows x86-64 (`windows/amd64`) | `swarmfolio-windows-amd64.exe` |
+| macOS Apple Silicon (`darwin/arm64`) | `swarmfolio-darwin-arm64.tar.gz` |
+| Linux x86-64 (`linux/amd64`) | `swarmfolio-linux-amd64.tar.gz` |
+| Windows x86-64 (`windows/amd64`) | `swarmfolio-windows-amd64.zip` |
 
-Download the matching asset from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), rename it to `swarmfolio` (or `swarmfolio.exe` on Windows), and place it on your `PATH`. On macOS and Linux, make it executable with `chmod +x swarmfolio`.
+Download and extract the matching archive from [the latest release](https://github.com/liblaf/swarmfolio/releases/latest), then place the included `swarmfolio` (or `swarmfolio.exe` on Windows) on your `PATH`. The macOS and Linux archives preserve executable permissions.
 
 For Linux AMD64:
 
 ```bash
 install -d ~/.local/bin
-gh release download --repo liblaf/swarmfolio --pattern swarmfolio-linux-amd64 --output ~/.local/bin/swarmfolio --clobber
-chmod +x ~/.local/bin/swarmfolio
+gh release download --repo liblaf/swarmfolio --pattern swarmfolio-linux-amd64.tar.gz --clobber
+tar -xzf swarmfolio-linux-amd64.tar.gz -C ~/.local/bin swarmfolio
 ```
 
 Alternatively, build it with Go 1.26 or newer:
@@ -131,7 +131,7 @@ go vet ./...
 go build ./cmd/swarmfolio
 ```
 
-Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). CI runs tests natively on macOS ARM64, Linux AMD64, and Windows AMD64. The project-owned release-assets workflow tests the tagged source on all three platforms before [GoReleaser](https://goreleaser.com/) builds and publishes exactly the three platform-named executables configured in [`.goreleaser.yaml`](.goreleaser.yaml).
+Repository maintenance comes from [`liblaf/copier-shared`](https://github.com/liblaf/copier-shared), while release PRs, tags, and GitHub Releases come from [`liblaf/copier-release`](https://github.com/liblaf/copier-release). CI runs tests natively on macOS ARM64, Linux AMD64, and Windows AMD64. The project-owned release-assets workflow tests the tagged source on all three platforms before [GoReleaser](https://goreleaser.com/) builds and publishes exactly the three platform-named archives configured in [`.goreleaser.yaml`](.goreleaser.yaml). Each archive contains the executable, README, license, and changelog.
 
 Validate the release configuration and build all release artifacts locally without publishing:
 
