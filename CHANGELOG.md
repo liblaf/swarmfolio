@@ -7,6 +7,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.1) - 2026-09-21
+
+### ✨ Features
+
+- **(optimizer)** optimize portfolios for M-Team upload credit - [e9dfed1](https://github.com/liblaf/swarmfolio/commit/e9dfed192e199dbaa881d9beb30d25546ad310da) by [@liblaf](https://github.com/liblaf)
+
+### 🐛 Bug Fixes
+
+- **(app)** identify torrents by hash and await initialization - [a77e484](https://github.com/liblaf/swarmfolio/commit/a77e4847e0ddc79a65a167503d3a718d3bae9756) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.3.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.0) - 2026-09-20
 
 ### 💥 BREAKING CHANGES
@@ -36,6 +50,7 @@ for the configured reserve. - [b483c1c](https://github.com/liblaf/swarmfolio/com
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.2.3](https://github.com/liblaf/swarmfolio/releases/tag/v0.2.3) - 2026-09-20
