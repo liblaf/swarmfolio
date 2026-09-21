@@ -15,7 +15,6 @@ import (
 	"github.com/liblaf/swarmfolio/internal/budget"
 	"github.com/liblaf/swarmfolio/internal/config"
 	"github.com/liblaf/swarmfolio/internal/disk"
-	"github.com/liblaf/swarmfolio/internal/metainfo"
 	"github.com/liblaf/swarmfolio/internal/mteam"
 	"github.com/liblaf/swarmfolio/internal/optimizer"
 	"github.com/liblaf/swarmfolio/internal/qbittorrent"
@@ -142,7 +141,8 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 	report.SkippedWithoutExpiry = skipped
 
-	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply)
+	resolved := candidateResolver{mteam: r.MTeam, byID: make(map[string]candidateMetainfo)}
+	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply, &resolved)
 	if err != nil {
 		return report, err
 	}
@@ -153,7 +153,6 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		}
 	}
 	report.Recoveries = recoveries
-	candidates = filterPresentCandidates(candidates, state.all, r.Config.QBittorrent.Category)
 
 	report.DownloadPath = state.targetPath
 	report.Budget = state.budget
@@ -166,7 +165,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		return report, nil
 	}
 
-	plan, err := optimizer.Build(now, candidates, state.forOptimizer, r.optimizerConfig(state.budget.LimitBytes))
+	plan, err := r.buildPlan(ctx, now, candidates, state, &resolved)
 	if err != nil {
 		return report, fmt.Errorf("build portfolio plan: %w", err)
 	}
@@ -181,7 +180,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 
 	for index := range plan.Additions {
-		if err := r.applyAddition(ctx, plan.Additions[index]); err != nil {
+		if err := r.applyAddition(ctx, plan.Additions[index], &resolved); err != nil {
 			return report, err
 		}
 		report.Actions[index].Applied = true
@@ -318,7 +317,7 @@ func (r Runner) optimizerConfig(limit int64) optimizer.Config {
 	}
 }
 
-func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates []optimizer.Candidate, apply bool) ([]Recovery, bool, error) {
+func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates []optimizer.Candidate, apply bool, resolved *candidateResolver) ([]Recovery, bool, error) {
 	var pending []qbittorrent.Torrent
 	for _, torrent := range state.all {
 		if torrent.Category == r.Config.QBittorrent.Category && torrent.AutoTMM &&
@@ -336,7 +335,6 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 	var recoveries []Recovery
 	var valid []qbittorrent.Torrent
 	var stale []qbittorrent.Torrent
-	resolved := make(map[string]string)
 	for _, torrent := range pending {
 		matched, err := r.pendingCandidateIsEligible(ctx, torrent, candidates, resolved)
 		if err != nil {
@@ -420,40 +418,21 @@ func torrentHashes(torrents []qbittorrent.Torrent) []string {
 	return hashes
 }
 
-func (r Runner) pendingCandidateIsEligible(ctx context.Context, torrent qbittorrent.Torrent, candidates []optimizer.Candidate, resolved map[string]string) (bool, error) {
+func (r Runner) pendingCandidateIsEligible(ctx context.Context, torrent qbittorrent.Torrent, candidates []optimizer.Candidate, resolved *candidateResolver) (bool, error) {
 	for _, candidate := range candidates {
-		if candidate.Name != torrent.Name || candidate.Size != torrent.Size ||
+		if candidate.Size != torrent.Size ||
 			candidate.FreeUntil.Sub(r.Now()) < r.Config.Policy.MinimumFreeleechRemaining {
 			continue
 		}
-		hash, ok := resolved[candidate.ID]
-		if !ok {
-			metainfoBytes, err := r.MTeam.Download(ctx, mustInt64(candidate.ID))
-			if err != nil {
-				return false, fmt.Errorf("download M-Team torrent %s while recovering %s: %w", candidate.ID, torrent.Hash, err)
-			}
-			hash, err = metainfo.InfoHash(metainfoBytes)
-			if err != nil {
-				return false, fmt.Errorf("inspect M-Team torrent %s while recovering %s: %w", candidate.ID, torrent.Hash, err)
-			}
-			resolved[candidate.ID] = hash
+		info, err := resolved.resolve(ctx, candidate.ID)
+		if err != nil {
+			return false, fmt.Errorf("recover pending torrent %s: %w", torrent.Hash, err)
 		}
-		if strings.EqualFold(hash, torrent.Hash) {
+		if strings.EqualFold(info.hash, torrent.Hash) {
 			return true, nil
 		}
 	}
 	return false, nil
-}
-
-func filterPresentCandidates(candidates []optimizer.Candidate, torrents []qbittorrent.Torrent, category string) []optimizer.Candidate {
-	return slices.DeleteFunc(slices.Clone(candidates), func(candidate optimizer.Candidate) bool {
-		for _, torrent := range torrents {
-			if torrent.Category == category && torrent.AutoTMM && torrent.Name == candidate.Name && torrent.Size == candidate.Size {
-				return true
-			}
-		}
-		return false
-	})
 }
 
 func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, error) {
@@ -511,19 +490,16 @@ func reportActions(plan optimizer.Plan) []Action {
 	return actions
 }
 
-func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition) error {
+func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, resolved *candidateResolver) error {
 	candidate := addition.Candidate
 	if candidate.FreeUntil.Sub(r.Now()) < r.Config.Policy.MinimumFreeleechRemaining {
 		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 	}
-	metainfoBytes, err := r.MTeam.Download(ctx, mustInt64(candidate.ID))
+	info, err := resolved.resolve(ctx, candidate.ID)
 	if err != nil {
-		return fmt.Errorf("download M-Team torrent %s: %w", candidate.ID, err)
+		return err
 	}
-	hash, err := metainfo.InfoHash(metainfoBytes)
-	if err != nil {
-		return fmt.Errorf("inspect M-Team torrent %s: %w", candidate.ID, err)
-	}
+	hash := info.hash
 	preallocate, err := r.QBittorrent.PreallocateAll(ctx)
 	if err != nil {
 		return fmt.Errorf("read qBittorrent preallocation setting: %w", err)
@@ -542,7 +518,7 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition) 
 		return fmt.Errorf("candidate %s already exists in qBittorrent as %s", candidate.ID, hash)
 	}
 	if err := r.QBittorrent.Add(ctx, qbittorrent.AddRequest{
-		Metainfo: metainfoBytes, MetainfoName: candidate.ID + ".torrent",
+		Metainfo: info.bytes, MetainfoName: candidate.ID + ".torrent",
 		SavePath: beforeAdd.targetPath, Category: r.Config.QBittorrent.Category,
 		Stopped: true, AutoTMM: true,
 	}); err != nil {
@@ -557,7 +533,7 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition) 
 	}
 	if added.Size != candidate.Size || !emptyStoppedDownload(*added) || added.Category != r.Config.QBittorrent.Category ||
 		!added.AutoTMM || !within(beforeAdd.targetPath, added.SavePath) {
-		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, automatically managed category plan", candidate.ID))
+		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, automatically managed category plan: state=%q size=%d (expected %d) amount_left=%d progress=%g category=%q auto_tmm=%t save_path=%q", candidate.ID, added.State, added.Size, candidate.Size, added.AmountLeft, added.Progress, added.Category, added.AutoTMM, added.SavePath))
 	}
 	afterAdd, err := r.snapshot(ctx)
 	if err != nil {
@@ -637,19 +613,30 @@ func (r Runner) waitForTorrent(ctx context.Context, hash string) (*qbittorrent.T
 	defer deadline.Stop()
 	ticker := time.NewTicker(r.PollInterval)
 	defer ticker.Stop()
+	lastState := ""
 	for {
 		torrents, err := r.QBittorrent.Torrents(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if torrent := findHash(torrents, hash); torrent != nil {
-			return torrent, torrents, nil
+			lastState = torrent.State
+			switch strings.ToLower(torrent.State) {
+			case "checkingresumedata", "checkingdl":
+				// qBittorrent briefly checks resume data after a stopped add.
+				// Wait for its stable state before enforcing Swarmfolio's plan.
+			default:
+				return torrent, torrents, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
 		case <-deadline.C:
-			return nil, nil, fmt.Errorf("torrent %s did not appear within %s", hash, r.PollTimeout)
+			if lastState == "" {
+				return nil, nil, fmt.Errorf("torrent %s did not appear within %s", hash, r.PollTimeout)
+			}
+			return nil, nil, fmt.Errorf("torrent %s did not leave transient checking state %q within %s", hash, lastState, r.PollTimeout)
 		case <-ticker.C:
 		}
 	}

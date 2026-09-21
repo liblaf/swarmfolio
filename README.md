@@ -20,7 +20,8 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 - qBittorrent is the only persistent source of truth. Swarmfolio has no database or cache.
 - The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
-- New torrents are added stopped before any old data is removed. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
+- New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
+- Torrent identity is determined by infohash, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
 - Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently.
 - Candidate API responses, disk accounting, torrent metadata, and state changes are validated; unexpected state stops the run visibly.
 
@@ -104,7 +105,7 @@ Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfo
 
 For the minimal configuration, qBittorrent must already allow unauthenticated access from Swarmfolio's connection. If authentication is required, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api-key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio asks M-Team only for `FREE` results, also recognizes `_2X_FREE`, and skips promotions without a verifiable expiry.
 
-Test the complete read-only path before enabling mutations:
+Test the complete read-only path before enabling mutations. Planning downloads selected candidates' metainfo to verify their infohashes and selects alternatives when a torrent already exists. It does not change qBittorrent:
 
 ```bash
 swarmfolio plan
@@ -172,7 +173,7 @@ replacement_margin = 1.25 # Must be finite and at least 1.
 
 The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Minimum freeleech time is an eligibility guard, not proof a download will finish before expiry. Real improvement needs comparison with actual credited upload over time.
 
-The read-only `plan` command never requests a torrent download token and never mutates qBittorrent. `run --apply` downloads metainfo only for selected candidates or interrupted-addition recovery, verifies exact info hashes, uploads additions stopped, rechecks category ownership and size, then performs the replacement.
+The read-only `plan` command requests download tokens and reads selected candidates' metainfo to verify their infohashes, without mutating qBittorrent. `run --apply` also resolves interrupted additions, reuses verified metainfo within the run, uploads additions stopped, waits for initialization, and rechecks category ownership and size before performing the replacement.
 
 ## ⌨️ Development and Releases
 

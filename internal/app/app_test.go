@@ -26,8 +26,8 @@ func TestExecutePlansWithoutMutating(t *testing.T) {
 	if len(report.Actions) != 1 || len(report.Actions[0].Removals) != 1 || report.Actions[0].Applied {
 		t.Fatalf("report = %#v", report)
 	}
-	if qbt.mutations != 0 || mt.downloads != 0 {
-		t.Fatalf("read-only plan mutated qBittorrent=%d or downloaded tokens=%d", qbt.mutations, mt.downloads)
+	if qbt.mutations != 0 || mt.downloads != 1 {
+		t.Fatalf("read-only plan: qBittorrent mutations=%d metainfo downloads=%d", qbt.mutations, mt.downloads)
 	}
 	if report.Budget.RequiredFreeBytes != 25 || report.Budget.LimitBytes != 75 {
 		t.Fatalf("budget = %#v", report.Budget)
@@ -408,8 +408,8 @@ func TestExecuteUsesAPIFreeSpaceWithOneTiBReserve(t *testing.T) {
 			if !queried || report.Budget.FreeBytes != test.free || report.Budget.RequiredFreeBytes != reserve || len(report.Actions) != test.wantActions {
 				t.Fatalf("unexpected API budget: queried=%v report=%#v", queried, report)
 			}
-			if qbt.mutations != 0 || mt.downloads != 0 {
-				t.Fatalf("read-only plan caused mutations: events=%v downloads=%d", qbt.events, mt.downloads)
+			if qbt.mutations != 0 || mt.downloads != test.wantActions {
+				t.Fatalf("read-only plan: events=%v metainfo downloads=%d", qbt.events, mt.downloads)
 			}
 		})
 	}
@@ -513,7 +513,9 @@ func TestExecuteRecoversAmbiguousPendingTorrentByExactHash(t *testing.T) {
 			9: pendingMetainfo,
 		},
 	}
-	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
+	runner := testRunner(qbt, mt)
+	runner.Config.Policy.MaxAdditions = 0 // Isolate recovery from the other valid offer.
+	report, err := runner.Execute(context.Background(), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +524,7 @@ func TestExecuteRecoversAmbiguousPendingTorrentByExactHash(t *testing.T) {
 	}
 }
 
-func TestExecuteSkipsCandidateAlreadyPresentByCategoryNameAndSize(t *testing.T) {
+func TestExecuteDoesNotConfuseMatchingNameAndSizeWithIdentity(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
 	qbt.torrents[0].Name = "new"
@@ -531,7 +533,7 @@ func TestExecuteSkipsCandidateAlreadyPresentByCategoryNameAndSize(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Actions) != 0 || mt.downloads != 0 {
+	if len(report.Actions) != 1 || mt.downloads != 1 || qbt.mutations != 0 {
 		t.Fatalf("report=%#v downloads=%d", report, mt.downloads)
 	}
 }
@@ -547,7 +549,7 @@ func TestExecuteDoesNotTreatAnotherCategoryAsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Actions) != 1 || report.Actions[0].CandidateID != "2" || mt.downloads != 0 {
+	if len(report.Actions) != 1 || report.Actions[0].CandidateID != "2" || mt.downloads != 1 {
 		t.Fatalf("report=%#v downloads=%d", report, mt.downloads)
 	}
 }
