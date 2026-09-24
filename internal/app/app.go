@@ -334,14 +334,16 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 	slices.SortFunc(pending, func(a, b qbittorrent.Torrent) int { return strings.Compare(a.Hash, b.Hash) })
 	var recoveries []Recovery
 	var valid []qbittorrent.Torrent
+	var validCandidates []optimizer.Candidate
 	var stale []qbittorrent.Torrent
 	for _, torrent := range pending {
-		matched, err := r.pendingCandidateIsEligible(ctx, torrent, candidates, resolved)
+		candidate, err := r.pendingCandidate(ctx, torrent, candidates, resolved)
 		if err != nil {
 			return recoveries, false, err
 		}
-		if matched {
+		if candidate != nil {
 			valid = append(valid, torrent)
+			validCandidates = append(validCandidates, *candidate)
 			continue
 		}
 		stale = append(stale, torrent)
@@ -366,11 +368,21 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 	if len(valid) == 0 {
 		return recoveries, len(stale) > 0, nil
 	}
+	var freeUntil time.Time
+	if state.budget.UsedBytes <= state.budget.LimitBytes {
+		freeUntil, err = r.verifyFreeleech(ctx, validCandidates)
+		if err != nil {
+			return recoveries, len(stale) > 0, fmt.Errorf("verify freeleech before resuming pending torrents: %w", err)
+		}
+	}
 	hashes, err := r.verifyPending(ctx, valid, state.targetPath)
 	if err != nil {
 		return recoveries, len(stale) > 0, err
 	}
 	if state.budget.UsedBytes <= state.budget.LimitBytes {
+		if !r.hasFreeleechTime(freeUntil) {
+			return recoveries, len(stale) > 0, errors.New("pending torrents no longer have the required freeleech time")
+		}
 		if err := r.QBittorrent.Start(ctx, hashes); err != nil {
 			return recoveries, len(stale) > 0, fmt.Errorf("resume pending torrents: %w", err)
 		}
@@ -418,21 +430,62 @@ func torrentHashes(torrents []qbittorrent.Torrent) []string {
 	return hashes
 }
 
-func (r Runner) pendingCandidateIsEligible(ctx context.Context, torrent qbittorrent.Torrent, candidates []optimizer.Candidate, resolved *candidateResolver) (bool, error) {
+func (r Runner) pendingCandidate(ctx context.Context, torrent qbittorrent.Torrent, candidates []optimizer.Candidate, resolved *candidateResolver) (*optimizer.Candidate, error) {
 	for _, candidate := range candidates {
 		if candidate.Size != torrent.Size ||
-			candidate.FreeUntil.Sub(r.Now()) < r.Config.Policy.MinimumFreeleechRemaining {
+			!r.hasFreeleechTime(candidate.FreeUntil) {
 			continue
 		}
 		info, err := resolved.resolve(ctx, candidate.ID)
 		if err != nil {
-			return false, fmt.Errorf("recover pending torrent %s: %w", torrent.Hash, err)
+			return nil, fmt.Errorf("recover pending torrent %s: %w", torrent.Hash, err)
 		}
 		if strings.EqualFold(info.hash, torrent.Hash) {
-			return true, nil
+			return &candidate, nil
 		}
 	}
-	return false, nil
+	return nil, nil
+}
+
+func (r Runner) hasFreeleechTime(until time.Time) bool {
+	now := r.Now()
+	return until.After(now) && until.Sub(now) >= r.Config.Policy.MinimumFreeleechRemaining
+}
+
+// verifyFreeleech requires fresh evidence from the current freeleech feed.
+// Offers absent from the configured search pages cannot authorize a download.
+// It returns the earliest expiry so callers can recheck time after qBittorrent
+// state validation, immediately before mutation.
+func (r Runner) verifyFreeleech(ctx context.Context, expected []optimizer.Candidate) (time.Time, error) {
+	results, err := r.MTeam.Search(ctx)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("refresh M-Team freeleech torrents: %w", err)
+	}
+	candidates, _, err := optimizerCandidates(results)
+	if err != nil {
+		return time.Time{}, err
+	}
+	current := make(map[string]optimizer.Candidate, len(candidates))
+	for _, candidate := range candidates {
+		current[candidate.ID] = candidate
+	}
+	var earliest time.Time
+	for _, candidate := range expected {
+		fresh, ok := current[candidate.ID]
+		if !ok {
+			return time.Time{}, fmt.Errorf("candidate %s no longer has a verifiable freeleech offer", candidate.ID)
+		}
+		if fresh.Size != candidate.Size {
+			return time.Time{}, fmt.Errorf("candidate %s changed size in the current freeleech offer", candidate.ID)
+		}
+		if !r.hasFreeleechTime(fresh.FreeUntil) {
+			return time.Time{}, fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
+		}
+		if earliest.IsZero() || fresh.FreeUntil.Before(earliest) {
+			earliest = fresh.FreeUntil
+		}
+	}
+	return earliest, nil
 }
 
 func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, error) {
@@ -492,7 +545,7 @@ func reportActions(plan optimizer.Plan) []Action {
 
 func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, resolved *candidateResolver) error {
 	candidate := addition.Candidate
-	if candidate.FreeUntil.Sub(r.Now()) < r.Config.Policy.MinimumFreeleechRemaining {
+	if !r.hasFreeleechTime(candidate.FreeUntil) {
 		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 	}
 	info, err := resolved.resolve(ctx, candidate.ID)
@@ -535,6 +588,13 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 		!added.AutoTMM || !within(beforeAdd.targetPath, added.SavePath) {
 		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, automatically managed category plan: state=%q size=%d (expected %d) amount_left=%d progress=%g category=%q auto_tmm=%t save_path=%q", candidate.ID, added.State, added.Size, candidate.Size, added.AmountLeft, added.Progress, added.Category, added.AutoTMM, added.SavePath))
 	}
+	var freeUntil time.Time
+	if len(addition.Removals) > 0 {
+		freeUntil, err = r.verifyFreeleech(ctx, []optimizer.Candidate{candidate})
+		if err != nil {
+			return rollback(err)
+		}
+	}
 	afterAdd, err := r.snapshot(ctx)
 	if err != nil {
 		return rollback(fmt.Errorf("refresh qBittorrent after adding candidate %s: %w", candidate.ID, err))
@@ -546,6 +606,9 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 		return rollback(err)
 	}
 	if len(addition.Removals) > 0 {
+		if !r.hasFreeleechTime(freeUntil) {
+			return rollback(fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID))
+		}
 		hashes := make([]string, len(addition.Removals))
 		for index, removal := range addition.Removals {
 			hashes[index] = removal.Hash
@@ -561,9 +624,16 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if err := validatePlannedUsed(afterDelete, 0, nil); err != nil {
 		return fmt.Errorf("candidate %s no longer fits the current budget after deletion: %w", candidate.ID, err)
 	}
+	freeUntil, err = r.verifyFreeleech(ctx, []optimizer.Candidate{candidate})
+	if err != nil {
+		return err
+	}
 	hashes, err := r.verifyPending(ctx, []qbittorrent.Torrent{{Hash: hash}}, afterDelete.targetPath)
 	if err != nil {
 		return fmt.Errorf("verify candidate %s before starting it: %w", candidate.ID, err)
+	}
+	if !r.hasFreeleechTime(freeUntil) {
+		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 	}
 	if err := r.QBittorrent.Start(ctx, hashes); err != nil {
 		return fmt.Errorf("start candidate %s: %w", candidate.ID, err)
