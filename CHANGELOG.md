@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.3.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.2) - 2026-09-24
+
+### 🐛 Bug Fixes
+
+- **(app)** recheck freeleech before replacing or starting torrents - [da7e546](https://github.com/liblaf/swarmfolio/commit/da7e546196673f1dd1488ab2f8110be637973841) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.3.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.1) - 2026-09-21
 
 ### ✨ Features
@@ -19,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.3.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.0) - 2026-09-20
