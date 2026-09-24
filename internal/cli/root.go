@@ -315,9 +315,6 @@ func writeReport(writer io.Writer, report app.Report) {
 	if len(report.Actions) == 0 && len(report.Recoveries) == 0 {
 		fmt.Fprintln(writer, "No changes selected.")
 	}
-	if report.SkippedWithoutExpiry > 0 {
-		fmt.Fprintf(writer, "Skipped %d freeleech candidates without a verifiable expiry.\n", report.SkippedWithoutExpiry)
-	}
 }
 
 func formatBytes(bytes int64) string {

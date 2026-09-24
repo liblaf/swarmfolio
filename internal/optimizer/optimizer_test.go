@@ -162,6 +162,46 @@ func TestBuildUsesCreditAndPayloadInsteadOfRatioAlone(t *testing.T) {
 	}
 }
 
+func TestBuildIndefiniteFreeleechKeepsFullCredit(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxAdditions = 3
+	indefiniteDouble := candidate("indefinite-double", 20, 1, 4)
+	indefiniteDouble.FreeUntil = time.Time{}
+	indefiniteDouble.UploadMultiplier = 2
+	indefinitePlain := candidate("indefinite-plain", 20, 1, 4)
+	indefinitePlain.FreeUntil = time.Time{}
+	timedDouble := candidate("timed-double", 20, 1, 4)
+	timedDouble.UploadMultiplier = 2
+	tooShort := candidate("too-short", 20, 1, 4)
+	tooShort.FreeUntil = testNow.Add(30 * time.Minute)
+	expired := candidate("expired", 20, 1, 4)
+	expired.FreeUntil = testNow
+
+	plan, err := Build(testNow, []Candidate{indefinitePlain, tooShort, timedDouble, expired, indefiniteDouble}, nil, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Additions) != 3 {
+		t.Fatalf("additions = %#v, want three eligible offers", plan.Additions)
+	}
+	got := []string{plan.Additions[0].Candidate.ID, plan.Additions[1].Candidate.ID, plan.Additions[2].Candidate.ID}
+	want := []string{"indefinite-double", "timed-double", "indefinite-plain"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ranked additions = %v, want %v", got, want)
+	}
+	for _, addition := range plan.Additions {
+		if math.IsNaN(addition.UploadScore) || math.IsInf(addition.UploadScore, 0) || addition.UploadScore <= 0 {
+			t.Fatalf("non-finite or non-positive upload score for %s: %g", addition.Candidate.ID, addition.UploadScore)
+		}
+	}
+	if got, want := plan.Additions[0].UploadScore, 2*plan.Additions[2].UploadScore; got != want {
+		t.Fatalf("indefinite 2x score = %g, want %g", got, want)
+	}
+	if !plan.Additions[0].Candidate.FreeUntil.IsZero() {
+		t.Fatal("indefinite offer gained a synthetic expiry")
+	}
+}
+
 func TestPromotionBonusExpiresAndFreshnessDecays(t *testing.T) {
 	c := candidate("double", 100, 1, 2)
 	c.UploadMultiplier = 2

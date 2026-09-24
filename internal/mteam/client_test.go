@@ -273,3 +273,59 @@ func TestExpiredFreeleechIsExcluded(t *testing.T) {
 		t.Fatalf("include=%v err=%v", include, err)
 	}
 }
+
+func TestFreeleechAcceptsExplicitNullOrEmptyEndTime(t *testing.T) {
+	t.Parallel()
+	client := testClient(t, "https://example.test", Config{Timezone: "UTC"})
+	for _, discount := range []string{"FREE", "_2X_FREE"} {
+		for _, endTime := range []string{`null`, `""`} {
+			t.Run(discount+"/"+endTime, func(t *testing.T) {
+				raw := json.RawMessage(`{"id":1,"name":"open-ended","size":1,"createdDate":"2099-01-01 00:00:00","status":{"discount":"` + discount + `","discountEndTime":` + endTime + `,"seeders":1,"leechers":1}}`)
+				got, include, err := client.decodeTorrent(raw)
+				if err != nil || !include || !got.DiscountEndTime.IsZero() {
+					t.Fatalf("got=%#v include=%v err=%v", got, include, err)
+				}
+			})
+		}
+	}
+}
+
+func TestFreeleechRejectsMissingOrMalformedEndTime(t *testing.T) {
+	t.Parallel()
+	client := testClient(t, "https://example.test", Config{Timezone: "UTC"})
+	for name, field := range map[string]string{
+		"missing":         ``,
+		"numeric zero":    `,"discountEndTime":0`,
+		"string zero":     `,"discountEndTime":"0"`,
+		"wrong JSON type": `,"discountEndTime":{}`,
+		"bad timestamp":   `,"discountEndTime":"not-a-time"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw := json.RawMessage(`{"id":1,"name":"bad-expiry","size":1,"createdDate":"2099-01-01 00:00:00","status":{"discount":"FREE"` + field + `,"seeders":1,"leechers":1}}`)
+			if _, _, err := client.decodeTorrent(raw); err == nil {
+				t.Fatal("decodeTorrent succeeded with invalid or missing discountEndTime")
+			}
+		})
+	}
+}
+
+func TestSearchRejectsTimedVersusIndefiniteDuplicate(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var query searchRequest
+		if err := json.NewDecoder(r.Body).Decode(&query); err != nil {
+			t.Fatal(err)
+		}
+		endTime := `"2099-01-01 00:00:00"`
+		if query.PageNumber == 2 {
+			endTime = `null`
+		}
+		io.WriteString(w, `{"code":0,"data":{"data":[{"id":1,"name":"one","size":1,"createdDate":"2099-01-01 00:00:00","status":{"discount":"FREE","discountEndTime":`+endTime+`,"seeders":1,"leechers":1}}]}}`)
+	}))
+	defer server.Close()
+
+	_, err := testClient(t, server.URL, Config{Pages: 2}).Search(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "conflicting duplicate") {
+		t.Fatalf("Search error = %v, want conflicting duplicate", err)
+	}
+}

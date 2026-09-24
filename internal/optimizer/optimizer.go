@@ -10,7 +10,9 @@ import (
 	"time"
 )
 
-// Candidate is a transient freeleech offer from the configured M-Team source.
+// Candidate is a freeleech offer accepted by the configured M-Team adapter.
+// A zero FreeUntil means the offer has no scheduled end. A nonzero FreeUntil
+// must still be in the future and meet MinFreeleechRemaining to be eligible.
 type Candidate struct {
 	ID               string
 	Name             string
@@ -161,7 +163,7 @@ func validateTorrents(torrents []Torrent) (int64, error) {
 func validateCandidates(candidates []Candidate) error {
 	ids := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
-		if c.ID == "" || c.Size <= 0 || c.Seeders < 0 || c.Leechers < 0 || c.PublishedAt.IsZero() || c.FreeUntil.IsZero() || (c.UploadMultiplier != 1 && c.UploadMultiplier != 2) {
+		if c.ID == "" || c.Size <= 0 || c.Seeders < 0 || c.Leechers < 0 || c.PublishedAt.IsZero() || (c.UploadMultiplier != 1 && c.UploadMultiplier != 2) {
 			return fmt.Errorf("optimizer: invalid candidate %q", c.ID)
 		}
 		if ids[c.ID] {
@@ -175,8 +177,8 @@ func validateCandidates(candidates []Candidate) error {
 func candidateEligible(now time.Time, c Candidate, cfg Config) bool {
 	age := now.Sub(c.PublishedAt)
 	return age >= 0 && age <= cfg.CandidateMaxAge &&
-		c.FreeUntil.After(now) && c.Leechers > 0 && c.Seeders > 0 &&
-		c.FreeUntil.Sub(now) >= cfg.MinFreeleechRemaining &&
+		(c.FreeUntil.IsZero() || (c.FreeUntil.After(now) && c.FreeUntil.Sub(now) >= cfg.MinFreeleechRemaining)) &&
+		c.Leechers > 0 && c.Seeders > 0 &&
 		c.Leechers >= cfg.MinLeechers && opportunity(c) >= cfg.MinOpportunityRatio
 }
 
@@ -206,11 +208,16 @@ func opportunity(c Candidate) float64 {
 // candidateScore is a credited-byte opportunity proxy, not a calibrated forecast.
 // Assume one generation of full-file leecher demand shared with the seeders,
 // discount stale demand, and prorate the bonus over the planning horizon. Base
-// upload remains valuable after freeleech ends; only the extra credit expires.
+// upload remains valuable after a timed freeleech ends; only its extra credit
+// expires. An offer with no scheduled end earns its full multiplier throughout
+// the planning horizon.
 func candidateScore(now time.Time, c Candidate, horizon time.Duration) float64 {
 	h := horizon.Seconds()
 	freshness := h / (h + now.Sub(c.PublishedAt).Seconds())
-	bonusFraction := min(1.0, c.FreeUntil.Sub(now).Seconds()/h)
+	bonusFraction := 1.0
+	if !c.FreeUntil.IsZero() {
+		bonusFraction = min(1.0, c.FreeUntil.Sub(now).Seconds()/h)
+	}
 	multiplier := 1 + float64(c.UploadMultiplier-1)*bonusFraction
 	return float64(c.Size) * opportunity(c) * freshness * multiplier
 }

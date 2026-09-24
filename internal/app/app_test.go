@@ -43,18 +43,18 @@ func TestOptimizerCandidatesMapsMTeamPromotionMultiplier(t *testing.T) {
 		ID: 2, Name: "two-x", Size: 30, Seeders: 1, Leechers: 8,
 		PublishedAt: appNow.Add(-time.Hour), Discount: "_2X_FREE", DiscountEndTime: appNow.Add(time.Hour),
 	}}
-	candidates, skipped, err := optimizerCandidates(results)
+	candidates, err := optimizerCandidates(results)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if skipped != 0 || len(candidates) != 1 || candidates[0].UploadMultiplier != 2 {
-		t.Fatalf("candidates=%#v skipped=%d", candidates, skipped)
+	if len(candidates) != 1 || candidates[0].UploadMultiplier != 2 {
+		t.Fatalf("candidates=%#v", candidates)
 	}
 }
 
 func TestOptimizerCandidatesRejectsUnsupportedPromotion(t *testing.T) {
 	t.Parallel()
-	_, _, err := optimizerCandidates([]mteam.Torrent{{
+	_, err := optimizerCandidates([]mteam.Torrent{{
 		ID: 2, Name: "unknown", Size: 30, Seeders: 1, Leechers: 8,
 		PublishedAt: appNow.Add(-time.Hour), Discount: "HALF", DiscountEndTime: appNow.Add(time.Hour),
 	}})

@@ -20,7 +20,7 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 - qBittorrent is the only persistent source of truth. Swarmfolio has no database or cache.
 - The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
-- Only `FREE` and `_2X_FREE` offers with a verifiable future expiry are allowed. Swarmfolio refreshes M-Team offers before deleting replacements and immediately before starting or resuming a download. Missing offers, non-free discounts, or insufficient freeleech time stop the action.
+- Only `FREE` and `_2X_FREE` offers are allowed. An explicit `null` or empty `discountEndTime` means no scheduled end; timed offers must have sufficient freeleech time remaining. Swarmfolio refreshes M-Team offers before deleting replacements and immediately before starting or resuming a download. Missing offers, non-free discounts, malformed expiry data, or insufficient freeleech time stop the action.
 - These checks govern download admission. As a one-shot tool, Swarmfolio does not continuously monitor running downloads or stop them when a promotion expires.
 - New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
 - Torrent identity is determined by infohash, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
@@ -105,7 +105,7 @@ If the reserve is already exhausted and no safe replacement plan fits, the run r
 
 Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte. Do not place user-managed torrents in this category.
 
-For the minimal configuration, qBittorrent must already allow unauthenticated access from Swarmfolio's connection. If authentication is required, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api-key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio searches M-Team for both `FREE` and `_2X_FREE` results and skips promotions without a verifiable expiry. Both promotions are download-free; `_2X_FREE` also doubles upload credit. An offer must still appear in the configured search pages when it is rechecked before replacement or start.
+For the minimal configuration, qBittorrent must already allow unauthenticated access from Swarmfolio's connection. If authentication is required, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api-key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio searches M-Team for both `FREE` and `_2X_FREE` results, including promotions with no scheduled end (`discountEndTime: null` or an empty string). Both promotions are download-free; `_2X_FREE` also doubles upload credit. An offer must still appear in the configured search pages when it is rechecked before replacement or start. A missing expiry field or malformed timestamp is an API error.
 
 Test the complete read-only path before enabling mutations. Planning downloads selected candidates' metainfo to verify their infohashes and selects alternatives when a torrent already exists. It does not change qBittorrent:
 
@@ -172,6 +172,8 @@ Optional policy overrides:
 planning_horizon = "24h"
 replacement_margin = 1.25 # Must be finite and at least 1.
 ```
+
+Offers with no scheduled end use the full promotion multiplier throughout the planning horizon. Their JSON `free_until` is `null`; timed offers retain an expiry timestamp.
 
 The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Minimum freeleech time is an eligibility guard, not proof a download will finish before expiry. Real improvement needs comparison with actual credited upload over time.
 

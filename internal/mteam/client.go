@@ -39,7 +39,7 @@ type Torrent struct {
 	Seeders         int64
 	Leechers        int64
 	Discount        string
-	DiscountEndTime time.Time // Zero means M-Team did not provide an end time.
+	DiscountEndTime time.Time // Zero means the offer has no scheduled end time.
 }
 
 // Client is an M-Team API client. It holds no state beyond its configuration.
@@ -241,10 +241,10 @@ type rawTorrent struct {
 	Size        stringOrNumber `json:"size"`
 	CreatedDate string         `json:"createdDate"`
 	Status      struct {
-		Discount        string         `json:"discount"`
-		DiscountEndTime string         `json:"discountEndTime"`
-		Seeders         stringOrNumber `json:"seeders"`
-		Leechers        stringOrNumber `json:"leechers"`
+		Discount        string          `json:"discount"`
+		DiscountEndTime json.RawMessage `json:"discountEndTime"`
+		Seeders         stringOrNumber  `json:"seeders"`
+		Leechers        stringOrNumber  `json:"leechers"`
 	} `json:"status"`
 }
 
@@ -396,11 +396,17 @@ func (c *Client) decodeTorrent(raw json.RawMessage) (Torrent, bool, error) {
 	if err != nil {
 		return Torrent{}, false, err
 	}
+	// Explicit null and empty strings mean no scheduled end. Decoding the raw
+	// field also rejects omitted fields and unexpected JSON types.
+	var endTimeText string
+	if err := json.Unmarshal(item.Status.DiscountEndTime, &endTimeText); err != nil {
+		return Torrent{}, false, fmt.Errorf("invalid discount end time: %w", err)
+	}
 	endTime := time.Time{}
-	if item.Status.DiscountEndTime != "" {
-		endTime, err = time.ParseInLocation("2006-01-02 15:04:05", item.Status.DiscountEndTime, c.location)
+	if endTimeText != "" {
+		endTime, err = time.ParseInLocation("2006-01-02 15:04:05", endTimeText, c.location)
 		if err != nil {
-			return Torrent{}, false, fmt.Errorf("invalid discount end time %q: %w", item.Status.DiscountEndTime, err)
+			return Torrent{}, false, fmt.Errorf("invalid discount end time %q: %w", endTimeText, err)
 		}
 		if !endTime.After(time.Now()) {
 			return Torrent{}, false, nil

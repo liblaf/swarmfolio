@@ -54,20 +54,19 @@ type Runner struct {
 }
 
 type Report struct {
-	Mode                 string        `json:"mode"`
-	GeneratedAt          time.Time     `json:"generated_at"`
-	ConfigPath           string        `json:"config_path"`
-	DownloadPath         string        `json:"download_path"`
-	Budget               budget.Result `json:"budget"`
-	TorrentCount         int           `json:"torrent_count"`
-	CandidateCount       int           `json:"candidate_count"`
-	SkippedWithoutExpiry int           `json:"skipped_without_expiry"`
-	ProjectedUsedBytes   int64         `json:"projected_used_bytes"`
-	PlanningHorizon      string        `json:"planning_horizon"`
-	ReplacementMargin    float64       `json:"replacement_margin"`
-	NetGain              float64       `json:"net_gain_score_bytes"`
-	Recoveries           []Recovery    `json:"recoveries,omitempty"`
-	Actions              []Action      `json:"actions"`
+	Mode               string        `json:"mode"`
+	GeneratedAt        time.Time     `json:"generated_at"`
+	ConfigPath         string        `json:"config_path"`
+	DownloadPath       string        `json:"download_path"`
+	Budget             budget.Result `json:"budget"`
+	TorrentCount       int           `json:"torrent_count"`
+	CandidateCount     int           `json:"candidate_count"`
+	ProjectedUsedBytes int64         `json:"projected_used_bytes"`
+	PlanningHorizon    string        `json:"planning_horizon"`
+	ReplacementMargin  float64       `json:"replacement_margin"`
+	NetGain            float64       `json:"net_gain_score_bytes"`
+	Recoveries         []Recovery    `json:"recoveries,omitempty"`
+	Actions            []Action      `json:"actions"`
 }
 
 type Recovery struct {
@@ -77,17 +76,17 @@ type Recovery struct {
 }
 
 type Action struct {
-	CandidateID      string    `json:"candidate_id"`
-	Name             string    `json:"name"`
-	SizeBytes        int64     `json:"size_bytes"`
-	Seeders          int       `json:"seeders"`
-	Leechers         int       `json:"leechers"`
-	Opportunity      float64   `json:"opportunity"`
-	UploadMultiplier int       `json:"upload_multiplier"`
-	UploadScore      float64   `json:"upload_score_bytes"`
-	FreeUntil        time.Time `json:"free_until"`
-	Removals         []Removal `json:"removals"`
-	Applied          bool      `json:"applied"`
+	CandidateID      string     `json:"candidate_id"`
+	Name             string     `json:"name"`
+	SizeBytes        int64      `json:"size_bytes"`
+	Seeders          int        `json:"seeders"`
+	Leechers         int        `json:"leechers"`
+	Opportunity      float64    `json:"opportunity"`
+	UploadMultiplier int        `json:"upload_multiplier"`
+	UploadScore      float64    `json:"upload_score_bytes"`
+	FreeUntil        *time.Time `json:"free_until"` // Nil means no scheduled end.
+	Removals         []Removal  `json:"removals"`
+	Applied          bool       `json:"applied"`
 }
 
 type Removal struct {
@@ -135,11 +134,10 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		return report, fmt.Errorf("search M-Team freeleech torrents: %w", err)
 	}
 	report.CandidateCount = len(results)
-	candidates, skipped, err := optimizerCandidates(results)
+	candidates, err := optimizerCandidates(results)
 	if err != nil {
 		return report, err
 	}
-	report.SkippedWithoutExpiry = skipped
 
 	resolved := candidateResolver{mteam: r.MTeam, byID: make(map[string]candidateMetainfo)}
 	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply, &resolved)
@@ -449,19 +447,20 @@ func (r Runner) pendingCandidate(ctx context.Context, torrent qbittorrent.Torren
 
 func (r Runner) hasFreeleechTime(until time.Time) bool {
 	now := r.Now()
-	return until.After(now) && until.Sub(now) >= r.Config.Policy.MinimumFreeleechRemaining
+	return until.IsZero() || (until.After(now) && until.Sub(now) >= r.Config.Policy.MinimumFreeleechRemaining)
 }
 
 // verifyFreeleech requires fresh evidence from the current freeleech feed.
 // Offers absent from the configured search pages cannot authorize a download.
-// It returns the earliest expiry so callers can recheck time after qBittorrent
-// state validation, immediately before mutation.
+// It returns the earliest scheduled expiry, or zero if every offer has no end,
+// so callers can recheck time after qBittorrent state validation, immediately
+// before mutation.
 func (r Runner) verifyFreeleech(ctx context.Context, expected []optimizer.Candidate) (time.Time, error) {
 	results, err := r.MTeam.Search(ctx)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("refresh M-Team freeleech torrents: %w", err)
 	}
-	candidates, _, err := optimizerCandidates(results)
+	candidates, err := optimizerCandidates(results)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -481,27 +480,22 @@ func (r Runner) verifyFreeleech(ctx context.Context, expected []optimizer.Candid
 		if !r.hasFreeleechTime(fresh.FreeUntil) {
 			return time.Time{}, fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 		}
-		if earliest.IsZero() || fresh.FreeUntil.Before(earliest) {
+		if !fresh.FreeUntil.IsZero() && (earliest.IsZero() || fresh.FreeUntil.Before(earliest)) {
 			earliest = fresh.FreeUntil
 		}
 	}
 	return earliest, nil
 }
 
-func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, error) {
+func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, error) {
 	candidates := make([]optimizer.Candidate, 0, len(results))
-	skipped := 0
 	for _, result := range results {
 		if result.ID <= 0 || result.Seeders < 0 || result.Leechers < 0 || result.Seeders > math.MaxInt || result.Leechers > math.MaxInt {
-			return nil, 0, fmt.Errorf("M-Team returned invalid candidate %d", result.ID)
+			return nil, fmt.Errorf("M-Team returned invalid candidate %d", result.ID)
 		}
 		multiplier, err := uploadMultiplier(result.Discount)
 		if err != nil {
-			return nil, 0, err
-		}
-		if result.DiscountEndTime.IsZero() {
-			skipped++
-			continue
+			return nil, err
 		}
 		candidates = append(candidates, optimizer.Candidate{
 			ID: strconv.FormatInt(result.ID, 10), Name: result.Name, Size: result.Size,
@@ -510,7 +504,7 @@ func optimizerCandidates(results []mteam.Torrent) ([]optimizer.Candidate, int, e
 			UploadMultiplier: multiplier,
 		})
 	}
-	return candidates, skipped, nil
+	return candidates, nil
 }
 
 func uploadMultiplier(discount string) (int, error) {
@@ -533,7 +527,10 @@ func reportActions(plan optimizer.Plan) []Action {
 			Seeders: candidate.Seeders, Leechers: candidate.Leechers,
 			Opportunity:      float64(candidate.Leechers) / (float64(candidate.Seeders) + 1),
 			UploadMultiplier: candidate.UploadMultiplier, UploadScore: addition.UploadScore,
-			FreeUntil: candidate.FreeUntil, Removals: make([]Removal, 0, len(addition.Removals)),
+			Removals: make([]Removal, 0, len(addition.Removals)),
+		}
+		if !candidate.FreeUntil.IsZero() {
+			action.FreeUntil = &candidate.FreeUntil
 		}
 		for _, removal := range addition.Removals {
 			action.Removals = append(action.Removals, Removal{Hash: removal.Hash, Name: removal.Name, SizeBytes: removal.Size, UploadScore: removal.UploadScore})
