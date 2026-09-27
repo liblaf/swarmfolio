@@ -26,7 +26,7 @@ func TestAPIKeyTorrents(t *testing.T) {
 		}
 		switch request.URL.Path {
 		case "/api/v2/torrents/info":
-			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","category":"freeleech","auto_tmm":true}]`)
+			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","content_path":"/data/Example","category":"freeleech","auto_tmm":true}]`)
 		default:
 			t.Errorf("unexpected request %s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -55,6 +55,9 @@ func TestAPIKeyTorrents(t *testing.T) {
 	if !torrent.AutoTMM {
 		t.Error("AutoTMM = false, want true")
 	}
+	if got, want := torrent.ContentPath, "/data/Example"; got != want {
+		t.Errorf("content path = %q, want %q", got, want)
+	}
 }
 
 func TestRequestWithoutAPIKeyOmitsAuthorization(t *testing.T) {
@@ -72,6 +75,56 @@ func TestRequestWithoutAPIKeyOmitsAuthorization(t *testing.T) {
 	}
 	if _, err := client.Torrents(context.Background()); err != nil {
 		t.Fatalf("Torrents: %v", err)
+	}
+}
+
+func TestRejectsRedirectsWithoutChangingInjectedClient(t *testing.T) {
+	var redirected bool
+	sink := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		redirected = true
+		if got := request.Header.Get("Authorization"); got != "" {
+			t.Errorf("redirect leaked Authorization %q", got)
+		}
+		_, _ = io.WriteString(writer, `[]`)
+	}))
+	defer sink.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, sink.URL+request.URL.Path, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	shared := &http.Client{}
+	client, err := New(Config{BaseURL: origin.URL, APIKey: testAPIKey, HTTPClient: shared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Torrents(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("Torrents redirect error = %v", err)
+	}
+	if redirected {
+		t.Fatal("qBittorrent client followed redirect")
+	}
+
+	response, err := shared.Get(origin.URL)
+	if err != nil {
+		t.Fatalf("shared client request: %v", err)
+	}
+	defer response.Body.Close()
+	if !redirected {
+		t.Fatal("New mutated the injected HTTP client redirect policy")
+	}
+}
+
+func TestRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, "[\""+strings.Repeat("a", int(maxResponseBytes))+"\"]")
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if _, err := client.Torrents(context.Background()); err == nil || !strings.Contains(err.Error(), "request body too large") {
+		t.Fatalf("Torrents oversized response error = %v", err)
 	}
 }
 
@@ -212,6 +265,7 @@ func TestMutations(t *testing.T) {
 			}
 			requests["add"] = request.MultipartForm.Value
 			writer.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(writer, `{"added_torrent_ids":["abc"],"failure_count":0,"pending_count":0,"success_count":1}`)
 		case "/api/v2/torrents/delete", "/api/v2/torrents/start":
 			if err := request.ParseForm(); err != nil {
 				t.Fatal(err)
@@ -272,6 +326,18 @@ func TestRejectsFailureResponses(t *testing.T) {
 	}
 	if _, err := client.Torrents(context.Background()); err == nil || !strings.Contains(err.Error(), "HTTP 401") {
 		t.Fatalf("Torrents failure = %v", err)
+	}
+}
+
+func TestMutationsRejectUnexpectedSuccessfulBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "<html>proxy error</html>")
+	}))
+	defer server.Close()
+
+	client := newTestClient(t, server.URL)
+	if err := client.Start(context.Background(), []string{"a"}); err == nil || !strings.Contains(err.Error(), "unexpected successful response") {
+		t.Fatalf("Start unexpected body error = %v", err)
 	}
 }
 

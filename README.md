@@ -18,12 +18,17 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 ## ✨ Safety Model
 
 - qBittorrent is the only persistent source of truth. Swarmfolio has no database or cache.
+- Both plans and applied runs use qBittorrent's reported free space by default. Swarmfolio subtracts outstanding download commitments and rechecks the reported budget before starting downloads.
 - The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
 - Only `FREE` and `_2X_FREE` offers are allowed. An explicit `null` or empty `discountEndTime` means no scheduled end; timed offers must have sufficient freeleech time remaining. Swarmfolio refreshes M-Team offers before deleting replacements and immediately before starting or resuming a download. Missing offers, non-free discounts, malformed expiry data, or insufficient freeleech time stop the action.
 - These checks govern download admission. As a one-shot tool, Swarmfolio does not continuously monitor running downloads or stop them when a promotion expires.
-- New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On the next applied run, an empty stopped download in the category is treated as an interrupted addition and is verified against current M-Team metainfo before it is resumed or removed.
-- Torrent identity is determined by infohash, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
+- New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On each applied run, stopped incomplete downloads in the category, including partial downloads, are verified against current M-Team metainfo before they are resumed or their registrations are removed.
+- Before starting a torrent or deleting completed content, Swarmfolio rejects overlapping content paths across all categories. Missing content paths stop the action because isolation cannot be verified.
+- Removing a pending torrent or rolling back an addition always retains its files (`deleteFiles=false`): zero verified progress does not prove that the files are absent or unshared. Retained files continue to consume disk space and may require manual cleanup.
+- Before deleting replacements, Swarmfolio rechecks that the new torrent is still stopped and correctly managed. Matching retained partial or complete data can be reused after its identity, size, and content isolation are verified. After deletion, it waits up to 60 seconds for the removed torrents to disappear and the reported disk space to preserve the reserve. A timeout leaves the new torrent stopped; the installed service retries automatically after one minute, rechecks qBittorrent and current freeleech offers, and resumes or replans the pending addition.
+- Preallocated additions must fit alongside all existing unfinished download commitments before any replacement data is deleted.
+- Torrent identity and payload size are checked against the downloaded metainfo before adding it, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
 - Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently.
 - Candidate API responses, disk accounting, torrent metadata, and state changes are validated; unexpected state stops the run visibly.
 
@@ -80,7 +85,7 @@ The generated private file requires only your M-Team API key:
 api-key = "replace-me"
 ```
 
-Everything else has an application default: qBittorrent at `http://localhost:8080` without authentication, category `swarmfolio`, no hard byte ceiling, at least **1 TiB free** on the download filesystem, and at most two additions and four removals per run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected. Existing `api_key` entries remain supported; use only one spelling per section.
+The remaining defaults are qBittorrent at `http://localhost:8080` without authentication, category `swarmfolio`, no hard byte ceiling, at least **1 TiB free** on the download filesystem, and at most two additions and four removals per run. Optional `[portfolio]`, `[mteam]`, `[qbittorrent]`, `[policy]`, and `[http]` keys override those defaults; unknown keys are rejected. Existing `api_key` entries remain supported; use only one spelling per section.
 
 For a different WebUI address or authenticated access, add:
 
@@ -90,9 +95,9 @@ base_url = "http://localhost:8080"
 api-key = "your-qbittorrent-api-key" # Omit when authentication is not required.
 ```
 
-The disk limit uses qBittorrent's reported free space and subtracts every unfinished byte already promised to qBittorrent before reserving 1 TiB (1,099,511,627,776 bytes). Total disk capacity and Docker access are not needed. By default, the managed category must be within qBittorrent's default save path and share its filesystem, such as `/downloads/.swarmfolio` under `/downloads`.
+The disk limit subtracts every unfinished byte already promised to qBittorrent from free space before reserving 1 TiB (1,099,511,627,776 bytes). Total disk capacity and Docker access are not needed. qBittorrent caches its API free-space value, so Swarmfolio polls after deletion until the reported space permits the download, with a 60-second timeout that leaves the addition stopped until automatic recovery. The reserve is checked against that estimate; recent disk writes may not yet appear in it.
 
-For a category on another filesystem, including a separate mount nested under the default path, set `portfolio.disk_path` to a host-visible path on that filesystem. To override the fixed reserve, use:
+The managed category must be within qBittorrent's default save path on the same filesystem, such as `/downloads/.swarmfolio` under `/downloads`. No extra setting is needed for this layout. The existing optional `portfolio.disk_path` override remains available for a direct measurement or a category on another filesystem, including a separate mount nested under the default path. To override the fixed reserve, use:
 
 ```toml
 [portfolio]
@@ -103,11 +108,11 @@ minimum_free = "1 TiB"
 
 If the reserve is already exhausted and no safe replacement plan fits, the run reports an error. Swarmfolio replaces only eligible managed torrents; it does not delete unrelated data to restore free space.
 
-Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, keeping its files separate from normal user-managed torrents while one filesystem budget accounts for every downloaded byte. Do not place user-managed torrents in this category.
+Swarmfolio manages torrents only in its `qbittorrent.category` (default `swarmfolio`). Before running it, create that category in qBittorrent, set its desired save path, and explicitly disable the category's separate incomplete-download path. Swarmfolio enables **Automatic Torrent Management** for every torrent it adds, using the category save path while one filesystem budget accounts for every downloaded byte. Content isolation checks use qBittorrent-reported paths; keep the category directory dedicated, avoid filesystem aliases such as symlinks or bind mounts that expose the same files under different paths, and avoid concurrent content moves during an applied run. Do not place user-managed torrents in this category.
 
 For the minimal configuration, qBittorrent must already allow unauthenticated access from Swarmfolio's connection. If authentication is required, open **Tools → Preferences → Web UI**, generate an API key, and put it in `qbittorrent.api-key`; Swarmfolio sends it as a Bearer token. M-Team requires an API Access Token in `x-api-key`; create one under Control Panel → Lab → Access Token. Swarmfolio searches M-Team for both `FREE` and `_2X_FREE` results, including promotions with no scheduled end (`discountEndTime: null` or an empty string). Both promotions are download-free; `_2X_FREE` also doubles upload credit. An offer must still appear in the configured search pages when it is rechecked before replacement or start. A missing expiry field or malformed timestamp is an API error.
 
-Test the complete read-only path before enabling mutations. Planning downloads selected candidates' metainfo to verify their infohashes and selects alternatives when a torrent already exists. It does not change qBittorrent:
+Test the complete read-only path before enabling mutations. Planning downloads selected candidates' metainfo to verify their identities and payload sizes and selects alternatives when a torrent already exists. It does not change qBittorrent:
 
 ```bash
 swarmfolio plan
@@ -116,6 +121,8 @@ swarmfolio run --apply
 
 Use `--json` with `plan` or `run` for machine-readable reports.
 
+An execution failure still returns the available report and a nonzero exit status. Its `error` describes the failure, and `mutations` lists attempted `add`, `delete`, and `start` operations by infohash. Delete receipts also include `delete_files`, distinguishing content deletion from removal of the torrent registration while retaining files. Status `accepted` means qBittorrent acknowledged the request; asynchronous work may still be running. Status `unconfirmed` means the request failed without a confirmed outcome and may have taken effect. `actions[].applied` becomes true only after that entire addition sequence succeeds and qBittorrent reports the torrent running, queued, or complete. A start acknowledgement that leaves an incomplete torrent stopped fails the run so the service can retry. Recovery records likewise require confirmation that a torrent resumed or its registration disappeared. Configuration and startup errors that occur before execution begins produce only an error.
+
 ## 🐟 Fish Completion
 
 ```fish
@@ -123,7 +130,7 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
 swarmfolio completion fish >"${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/swarmfolio.fish"
 ```
 
-## ⏱️ Hourly User Timer (Linux)
+## ⏱️ Unattended Operation (Linux)
 
 The executable embeds [`swarmfolio.service`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.service) and [`swarmfolio.timer`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.timer). Install the user units and start the hourly timer with:
 
@@ -133,6 +140,10 @@ systemctl --user list-timers swarmfolio.timer
 ```
 
 `systemd install` writes the embedded units, reloads the user systemd manager, and enables and starts `swarmfolio.timer`. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried.
+
+The timer performs routine optimization hourly. If a run fails, the service retries automatically after one minute and continues retrying without a start-limit lockout. Each retry rebuilds its decisions from current qBittorrent state and M-Team offers; it can resume a valid pending addition, remove a stale registration while retaining its files, or replan an interrupted replacement. An API response lost after a successful operation is reconciled from the next snapshot. No manual torrent start or recovery command is needed for these interrupted runs. Errors remain visible in `journalctl --user -u swarmfolio.service`.
+
+When upgrading an existing installation, `swarmfolio systemd install --force` installs the updated retry policy and keeps the hourly timer enabled. The standalone `run --apply` command still performs one pass; the installed service supplies automatic retries.
 
 The service runs `swarmfolio` by name, searching `~/.local/bin` and standard system binary directories. For another installation directory, extend `ExecSearchPath` in a drop-in with `systemctl --user edit swarmfolio.service`.
 
@@ -178,6 +189,8 @@ Offers with no scheduled end use the full promotion multiplier throughout the pl
 The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Minimum freeleech time is an eligibility guard, not proof a download will finish before expiry. Real improvement needs comparison with actual credited upload over time.
 
 The read-only `plan` command requests download tokens and reads selected candidates' metainfo to verify their infohashes, without mutating qBittorrent. `run --apply` also resolves interrupted additions, reuses verified metainfo within the run, uploads additions stopped, waits for initialization, and rechecks category ownership and size before performing the replacement.
+
+M-Team limits each torrent's metainfo downloads to ten per day. If it reports that this allowance is exhausted, Swarmfolio lists the affected ID under `skipped_candidates` (or `Skipped M-Team` in text output), excludes it for the current run, and replans using other verified freeleech offers. A later scheduled run can try that torrent again. This specific quota response does not block the whole portfolio; other API, authentication, network, or malformed-metadata errors still stop the run visibly.
 
 ## ⌨️ Development and Releases
 

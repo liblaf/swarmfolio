@@ -3,6 +3,7 @@ package mteam
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -178,7 +179,7 @@ func TestDownloadUsesTokenAndValidatesTorrent(t *testing.T) {
 			// test so the local test endpoint can stand in for that server.
 			io.WriteString(w, `{"code":"0","data":"https://mteam.test/torrent"}`)
 		case "/torrent":
-			io.WriteString(w, "d4:infod4:name1:xee")
+			io.WriteString(w, "d4:infod6:lengthi1e4:name1:xee")
 		default:
 			t.Fatalf("unexpected path %q", r.URL.Path)
 		}
@@ -197,7 +198,7 @@ func TestDownloadUsesTokenAndValidatesTorrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "d4:infod4:name1:xee" {
+	if string(got) != "d4:infod6:lengthi1e4:name1:xee" {
 		t.Fatalf("download = %q", got)
 	}
 }
@@ -214,6 +215,118 @@ func TestDownloadRejectsNonTorrent(t *testing.T) {
 	_, err := client.Download(context.Background(), 1)
 	if err == nil || !strings.Contains(err.Error(), "download torrent") {
 		t.Fatalf("error = %v, want download error", err)
+	}
+}
+
+func TestCredentialedRequestsDoNotFollowRedirects(t *testing.T) {
+	t.Parallel()
+	var leakedKey string
+	redirectPolicyCalled := false
+	sharedClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		redirectPolicyCalled = true
+		return nil
+	}}
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leakedKey = r.Header.Get("x-api-key")
+		io.WriteString(w, `{"code":0,"data":{"data":[]}}`)
+	}))
+	defer sink.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, sink.URL, http.StatusFound)
+	}))
+	defer origin.Close()
+
+	_, err := testClient(t, origin.URL, Config{HTTPClient: sharedClient}).Search(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "302 Found") {
+		t.Fatalf("Search error = %v, want rejected redirect", err)
+	}
+	if leakedKey != "" {
+		t.Fatalf("redirect target received API key %q", leakedKey)
+	}
+	probe, err := http.NewRequest(http.MethodGet, "https://example.test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sharedClient.CheckRedirect(probe, nil); err != nil || !redirectPolicyCalled {
+		t.Fatalf("injected redirect policy was mutated: err=%v called=%t", err, redirectPolicyCalled)
+	}
+}
+
+func TestDownloadRedirectKeepsHTTPSAndStripsTokenReferer(t *testing.T) {
+	t.Parallel()
+	const tokenURL = "https://download.test/torrent?token=secret-token"
+	var referer string
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Request: request}
+		switch request.URL.Host {
+		case "mteam.test":
+			response.Body = io.NopCloser(strings.NewReader(`{"code":0,"data":"` + tokenURL + `"}`))
+		case "download.test":
+			response.StatusCode = http.StatusFound
+			response.Status = "302 Found"
+			response.Header.Set("Location", "https://sink.test/torrent")
+			response.Body = io.NopCloser(strings.NewReader(""))
+		case "sink.test":
+			referer = request.Header.Get("Referer")
+			response.Body = io.NopCloser(strings.NewReader("d4:infod6:lengthi1e4:name1:xee"))
+		default:
+			t.Fatalf("unexpected request to %s", request.URL)
+		}
+		return response, nil
+	})
+	client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+	if _, err := client.Download(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if referer != "" {
+		t.Fatalf("redirected download leaked token URL in Referer %q", referer)
+	}
+}
+
+func TestDownloadRejectsInsecureRedirectAndRedactsTokenURL(t *testing.T) {
+	t.Parallel()
+	const tokenURL = "https://download.test/torrent?token=secret-token"
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Request: request}
+		switch request.URL.Host {
+		case "mteam.test":
+			response.Body = io.NopCloser(strings.NewReader(`{"code":0,"data":"` + tokenURL + `"}`))
+		case "download.test":
+			response.StatusCode = http.StatusFound
+			response.Status = "302 Found"
+			response.Header.Set("Location", "http://sink.test/torrent")
+			response.Body = io.NopCloser(strings.NewReader(""))
+		default:
+			t.Fatalf("unexpected request to %s", request.URL)
+		}
+		return response, nil
+	})
+	client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+	_, err := client.Download(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "download torrent: request failed") || strings.Contains(err.Error(), tokenURL) {
+		t.Fatalf("Download error = %q", err)
+	}
+}
+
+func TestDownloadTransportErrorRedactsTokenAndPreservesCause(t *testing.T) {
+	t.Parallel()
+	const tokenURL = "https://download.test/torrent?token=secret-token"
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "download.test" {
+			return nil, context.Canceled
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"code":0,"data":"` + tokenURL + `"}`)),
+			Request:    request,
+		}, nil
+	})
+	client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+	_, err := client.Download(context.Background(), 1)
+	if err == nil || !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), tokenURL) {
+		t.Fatalf("Download error = %q", err)
 	}
 }
 
@@ -250,8 +363,8 @@ func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, erro
 func TestValidateTorrent(t *testing.T) {
 	t.Parallel()
 	for _, input := range [][]byte{
-		[]byte("d4:infod4:name1:xee"),
-		[]byte("d8:announce4:test4:infod4:name1:xee"),
+		[]byte("d4:infod6:lengthi1e4:name1:xee"),
+		[]byte("d8:announce4:test4:infod6:lengthi1e4:name1:xee"),
 	} {
 		if err := validateTorrent(input); err != nil {
 			t.Fatalf("validateTorrent(%q): %v", input, err)
@@ -262,6 +375,96 @@ func TestValidateTorrent(t *testing.T) {
 	}
 	if err := validateTorrent([]byte("d4:name1:xe")); err == nil {
 		t.Fatal("validateTorrent accepted no-info dictionary")
+	}
+	deep := []byte("d4:info" + strings.Repeat("l", 101) + "i0e" + strings.Repeat("e", 102))
+	if err := validateTorrent(deep); err == nil || !strings.Contains(err.Error(), "nesting") {
+		t.Fatalf("validateTorrent accepted or misreported deeply nested metainfo: %v", err)
+	}
+	if err := validateTorrent([]byte("<html><title>proxy error</title></html>")); err == nil {
+		t.Fatal("validateTorrent accepted a proxy HTML response")
+	}
+}
+
+func TestDownloadRejectsProxyHTMLWithoutExposingToken(t *testing.T) {
+	t.Parallel()
+	const tokenURL = "https://download.test/torrent?token=secret-token"
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Request: request}
+		switch request.URL.Host {
+		case "mteam.test":
+			response.Body = io.NopCloser(strings.NewReader(`{"code":0,"data":"` + tokenURL + `"}`))
+		case "download.test":
+			response.Body = io.NopCloser(strings.NewReader("<html><title>upstream proxy</title></html>"))
+		default:
+			t.Fatalf("unexpected request to %s", request.URL)
+		}
+		return response, nil
+	})
+	client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+	_, err := client.Download(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "invalid torrent metainfo") || strings.Contains(err.Error(), tokenURL) || strings.Contains(err.Error(), "proxy") {
+		t.Fatalf("Download error = %q", err)
+	}
+}
+
+func TestDownloadAPIErrorsRedactUpstreamMessage(t *testing.T) {
+	t.Parallel()
+	const tokenURL = "https://download.test/torrent?token=secret-token"
+	const upstreamSecret = "https://internal.example/error?secret=never-log"
+	transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		response := &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Request: request}
+		switch request.URL.Host {
+		case "mteam.test":
+			response.Body = io.NopCloser(strings.NewReader(`{"code":0,"data":"` + tokenURL + `"}`))
+		case "download.test":
+			response.Body = io.NopCloser(strings.NewReader(`{"code":7,"message":"` + upstreamSecret + `","data":null}`))
+		default:
+			t.Fatalf("unexpected request to %s", request.URL)
+		}
+		return response, nil
+	})
+	client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+	_, err := client.Download(context.Background(), 1)
+	if err == nil || !strings.Contains(err.Error(), "download API error 7") || strings.Contains(err.Error(), tokenURL) || strings.Contains(err.Error(), upstreamSecret) {
+		t.Fatalf("Download error = %q", err)
+	}
+}
+
+func TestDownloadRecognizesOnlyPerTorrentDailyLimit(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, code, message string
+		limited             bool
+	}{
+		{"daily allowance", "1", "相同種子當天最多下載10次", true},
+		{"string code", `"1"`, "相同種子當天最多下載10次", true},
+		{"account rate limit", "1", "too many requests", false},
+		{"permission", "1", "permission denied", false},
+		{"different code", "2", "相同種子當天最多下載10次", false},
+		{"unrecognized message", "1", "相同種子當天最多下載10次 https://private.test/?token=secret", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			message, err := json.Marshal(test.message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+				body := `{"code":0,"data":"https://download.test/torrent?token=secret"}`
+				if request.URL.Host == "download.test" {
+					body = `{"code":` + test.code + `,"message":` + string(message) + `,"data":null}`
+				}
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+			})
+			client := testClient(t, "https://mteam.test", Config{HTTPClient: &http.Client{Transport: transport}})
+			_, err = client.Download(context.Background(), 42)
+			if err == nil || errors.Is(err, ErrTorrentDownloadLimit) != test.limited {
+				t.Fatalf("Download error=%v, want daily limit=%t", err, test.limited)
+			}
+			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), test.message) {
+				t.Fatalf("Download exposed upstream response: %v", err)
+			}
+		})
 	}
 }
 

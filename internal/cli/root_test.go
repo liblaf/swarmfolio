@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/liblaf/swarmfolio/internal/app"
 	"github.com/liblaf/swarmfolio/internal/budget"
+	"github.com/liblaf/swarmfolio/internal/metainfo"
 )
 
 func TestPlanWithMinimalInitializedConfig(t *testing.T) {
@@ -104,6 +106,201 @@ func TestPlanWithMinimalInitializedConfig(t *testing.T) {
 	if report.Budget.RequiredFreeBytes != 1<<40 || report.Budget.FreeBytes != 2<<40 || report.Budget.LimitBytes != 1<<40 {
 		t.Fatalf("minimal config did not reserve 1 TiB using qBittorrent free space: %#v", report.Budget)
 	}
+}
+
+func TestApplyReportsAcknowledgedMutationsAfterPostDeleteFailure(t *testing.T) {
+	const metainfoBytes = "d4:infod6:lengthi30e4:name3:newee"
+	newHash, err := metainfo.InfoHash([]byte(metainfoBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	config := `[portfolio]
+minimum_free = "1 B"
+budget = "70 B"
+
+[mteam]
+api-key = "mteam-secret"
+base_url = "https://mteam.test"
+
+[qbittorrent]
+base_url = "http://qbt.test"
+
+[policy]
+minimum_idle = "1h"
+minimum_residency = "1h"
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	added, deleted := false, false
+	now := time.Now().Unix()
+	createdDate := time.Now().In(time.FixedZone("Asia/Shanghai", 8*60*60)).Format("2006-01-02 15:04:05")
+	http.DefaultTransport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body := ""
+		status := http.StatusOK
+		switch request.URL.Host {
+		case "mteam.test":
+			switch request.URL.Path {
+			case "/api/torrent/search":
+				data, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(data), `"discount":"FREE"`) {
+					body = fmt.Sprintf(`{"code":0,"data":{"data":[{"id":2,"name":"new","size":30,"createdDate":%q,"status":{"discount":"FREE","discountEndTime":"2099-01-01 00:00:00","seeders":1,"leechers":8}}]}}`, createdDate)
+				} else {
+					body = `{"code":0,"data":{"data":[]}}`
+				}
+			case "/api/torrent/genDlToken":
+				body = `{"code":0,"data":"https://download.test/torrent"}`
+			default:
+				t.Fatalf("unexpected M-Team request: %s", request.URL)
+			}
+		case "download.test":
+			body = metainfoBytes
+		case "qbt.test":
+			switch request.URL.Path {
+			case "/api/v2/torrents/info":
+				if deleted {
+					status, body = http.StatusInternalServerError, "snapshot failed after delete"
+					break
+				}
+				body = qBittorrentTorrentsJSON(added, newHash, now)
+			case "/api/v2/torrents/categories":
+				body = `{"swarmfolio":{"savePath":"/downloads/swarmfolio","download_path":false}}`
+			case "/api/v2/app/defaultSavePath":
+				body = "/downloads"
+			case "/api/v2/sync/maindata":
+				body = `{"server_state":{"free_space_on_disk":30}}`
+			case "/api/v2/app/preferences":
+				body = `{"preallocate_all":false}`
+			case "/api/v2/torrents/add":
+				added = true
+			case "/api/v2/torrents/delete":
+				deleted = true
+			default:
+				t.Fatalf("unexpected qBittorrent request: %s %s", request.Method, request.URL)
+			}
+		default:
+			t.Fatalf("unexpected request: %s", request.URL)
+		}
+		return httpTestResponse(request, status, body), nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"--config", path, "run", "--apply", "--json"})
+	err = command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "refresh qBittorrent after deleting replacements") {
+		t.Fatalf("apply error = %v; output=%s", err, stdout.String())
+	}
+	var report app.Report
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode partial report: %v; output=%s", err, stdout.String())
+	}
+	if report.Error == "" || !strings.Contains(report.Error, "refresh qBittorrent after deleting replacements") {
+		t.Fatalf("partial report error = %q", report.Error)
+	}
+	if !containsMutation(report.Mutations, "delete", []string{"old"}, "accepted", true) {
+		t.Fatalf("partial report did not acknowledge deletion: %#v", report.Mutations)
+	}
+	if len(report.Actions) != 1 || report.Actions[0].Applied {
+		t.Fatalf("partial action outcome = %#v", report.Actions)
+	}
+}
+
+func TestWriteOutcomePreservesOperationAndWriterErrors(t *testing.T) {
+	t.Parallel()
+	operationErr := errors.New("operation failed")
+	writerErr := errors.New("writer failed")
+	err := writeOutcome(errorWriter{err: writerErr}, app.Report{Error: operationErr.Error()}, false, operationErr)
+	if !errors.Is(err, operationErr) || !errors.Is(err, writerErr) {
+		t.Fatalf("joined error = %v", err)
+	}
+}
+
+func TestWriteReportShowsDailyDownloadLimitExclusion(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	err := writeReport(&output, app.Report{
+		Mode: "plan",
+		SkippedCandidates: []app.SkippedCandidate{{
+			CandidateID: "1259628", Reason: "daily torrent download limit reached",
+		}},
+	})
+	if err != nil || !strings.Contains(output.String(), "Skipped M-Team 1259628: daily torrent download limit reached") {
+		t.Fatalf("error=%v output=%q", err, output.String())
+	}
+}
+
+func TestWriteReportDistinguishesPlannedActionsFromMutations(t *testing.T) {
+	t.Parallel()
+	deleteFiles := true
+	keepFiles := false
+	var output bytes.Buffer
+	err := writeReport(&output, app.Report{
+		Actions: []app.Action{{CandidateID: "2", Name: "candidate"}},
+		Mutations: []app.Mutation{
+			{Operation: "delete", Hashes: []string{"old"}, Status: "accepted", DeleteFiles: &deleteFiles},
+			{Operation: "delete", Hashes: []string{"pending"}, Status: "accepted", DeleteFiles: &keepFiles},
+		},
+		Error: "snapshot failed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Mutation delete: old (accepted; delete files)", "Mutation delete: pending (accepted; keep files)", "Planned addition (not completed): candidate", "Outcome error: snapshot failed"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("report %q does not contain %q", output.String(), want)
+		}
+	}
+}
+
+type errorWriter struct{ err error }
+
+func (writer errorWriter) Write([]byte) (int, error) { return 0, writer.err }
+
+func containsMutation(mutations []app.Mutation, operation string, hashes []string, status string, deleteFiles bool) bool {
+	for _, mutation := range mutations {
+		if mutation.Operation == operation && slices.Equal(mutation.Hashes, hashes) && mutation.Status == status && mutation.DeleteFiles != nil && *mutation.DeleteFiles == deleteFiles {
+			return true
+		}
+	}
+	return false
+}
+
+func httpTestResponse(request *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    request,
+	}
+}
+
+func qBittorrentTorrentsJSON(added bool, newHash string, now int64) string {
+	torrents := []map[string]any{{
+		"hash": "old", "name": "old", "size": 70, "uploaded": 1, "amount_left": 0, "progress": 1,
+		"added_on": now - int64((2 * time.Hour).Seconds()), "last_activity": now - int64((2 * time.Hour).Seconds()),
+		"save_path": "/downloads/swarmfolio/old", "content_path": "/downloads/swarmfolio/old/content", "state": "stoppedUP", "category": "swarmfolio", "auto_tmm": true,
+	}}
+	if added {
+		torrents = append(torrents, map[string]any{
+			"hash": newHash, "name": "new", "size": 30, "amount_left": 30, "progress": 0,
+			"added_on": now, "last_activity": now, "save_path": "/downloads/swarmfolio/new", "content_path": "/downloads/swarmfolio/new/content", "state": "stoppedDL", "category": "swarmfolio", "auto_tmm": true,
+		})
+	}
+	data, err := json.Marshal(torrents)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -249,6 +446,39 @@ func TestSystemdPrintServiceHasNoEnvironmentFile(t *testing.T) {
 	if strings.Contains(service, "EnvironmentFile=") {
 		t.Fatalf("service output unexpectedly contains EnvironmentFile: %q", service)
 	}
+}
+
+func TestSystemdServiceRetriesFailedRunsWithoutRateLimitLockout(t *testing.T) {
+	requireLinux(t)
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"systemd", "print", "service"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	directives := systemdDirectives(stdout.String())
+	if directives["Restart"] != "on-failure" {
+		t.Fatalf("Restart = %q; failed runs will not be retried", directives["Restart"])
+	}
+	delay, err := time.ParseDuration(directives["RestartSec"])
+	if err != nil || delay < time.Minute {
+		t.Fatalf("RestartSec = %q; retry delay must be at least one minute: %v", directives["RestartSec"], err)
+	}
+	if directives["StartLimitIntervalSec"] != "0" {
+		t.Fatalf("StartLimitIntervalSec = %q; systemd can permanently stop retries after a start burst", directives["StartLimitIntervalSec"])
+	}
+}
+
+func systemdDirectives(unit string) map[string]string {
+	directives := make(map[string]string)
+	for line := range strings.Lines(unit) {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			directives[strings.TrimSpace(key)] = strings.TrimSpace(value)
+		}
+	}
+	return directives
 }
 
 func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {

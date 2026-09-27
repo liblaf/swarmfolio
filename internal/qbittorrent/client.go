@@ -18,6 +18,8 @@ import (
 	"time"
 )
 
+const maxResponseBytes int64 = 16 << 20
+
 // Config configures a qBittorrent Web API client. BaseURL is the qBittorrent
 // web UI URL; an optional /api/v2 suffix is accepted.
 type Config struct {
@@ -53,6 +55,7 @@ type Torrent struct {
 	DLRate       int64
 	UPRate       int64
 	SavePath     string
+	ContentPath  string
 	Category     string
 	AutoTMM      bool
 }
@@ -86,12 +89,18 @@ func New(config Config) (*Client, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
+	// Requests carry an API key or a session cookie. Never let a redirect send
+	// either credential to a different endpoint, including a different port.
+	isolatedClient := *client
+	isolatedClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 
 	return &Client{
 		baseURL: u,
 		origin:  (&url.URL{Scheme: u.Scheme, Host: u.Host}).String(),
 		apiKey:  config.APIKey,
-		http:    client,
+		http:    &isolatedClient,
 	}, nil
 }
 
@@ -109,6 +118,9 @@ func (c *Client) Torrents(ctx context.Context) ([]Torrent, error) {
 	var wire []torrentResponse
 	if err := json.NewDecoder(response.Body).Decode(&wire); err != nil {
 		return nil, fmt.Errorf("decode torrents response: %w", err)
+	}
+	if wire == nil {
+		return nil, errors.New("qBittorrent torrents response must be an array, not null")
 	}
 	torrents := make([]Torrent, 0, len(wire))
 	for _, item := range wire {
@@ -175,7 +187,8 @@ func (c *Client) CategorySavePath(ctx context.Context, category string) (string,
 	return *configured.SavePath, nil
 }
 
-// FreeSpace returns free bytes on qBittorrent's download filesystem.
+// FreeSpace returns qBittorrent's cached free-space estimate for its default
+// download filesystem. A fresh API response may still contain an older estimate.
 func (c *Client) FreeSpace(ctx context.Context) (int64, error) {
 	response, err := c.request(ctx, http.MethodGet, "sync/maindata", nil, "", url.Values{"rid": {"0"}})
 	if err != nil {
@@ -304,7 +317,10 @@ func (c *Client) mutate(ctx context.Context, endpoint string, body []byte, conte
 		return err
 	}
 	defer response.Body.Close()
-	return requireSuccess(response)
+	if err := requireSuccess(response); err != nil {
+		return err
+	}
+	return requireMutationAck(endpoint, response.Body)
 }
 
 func (c *Client) request(ctx context.Context, method, endpoint string, body io.Reader, contentType string, query url.Values) (*http.Response, error) {
@@ -327,22 +343,49 @@ func (c *Client) request(ctx context.Context, method, endpoint string, body io.R
 	if err != nil {
 		return nil, fmt.Errorf("qBittorrent %s %s: %w", method, endpoint, err)
 	}
+	response.Body = http.MaxBytesReader(nil, response.Body, maxResponseBytes)
 	return response, nil
 }
 
 func requireSuccess(response *http.Response) error {
-	body, err := io.ReadAll(response.Body)
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("qBittorrent returned HTTP %d", response.StatusCode)
+	}
+	prefix, err := io.ReadAll(io.LimitReader(response.Body, int64(len("Fails.")+1)))
 	if err != nil {
 		return fmt.Errorf("read qBittorrent response: %w", err)
 	}
-	response.Body = io.NopCloser(bytes.NewReader(body))
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return fmt.Errorf("qBittorrent returned HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if strings.TrimSpace(string(body)) == "Fails." {
+	response.Body = &prependReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), response.Body), Closer: response.Body}
+	if strings.TrimSpace(string(prefix)) == "Fails." {
 		return errors.New("qBittorrent rejected request: Fails.")
 	}
 	return nil
+}
+
+type prependReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func requireMutationAck(endpoint string, body io.Reader) error {
+	payload, err := io.ReadAll(body)
+	if err != nil {
+		return fmt.Errorf("read qBittorrent mutation response: %w", err)
+	}
+	ack := strings.TrimSpace(string(payload))
+	if ack == "" || ack == "Ok." {
+		return nil
+	}
+	if endpoint == "torrents/add" {
+		var result struct {
+			SuccessCount *int `json:"success_count"`
+			FailureCount int  `json:"failure_count"`
+		}
+		if err := json.Unmarshal(payload, &result); err == nil && result.SuccessCount != nil && *result.SuccessCount > 0 && result.FailureCount == 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("qBittorrent returned an unexpected successful response for %s", endpoint)
 }
 
 type torrentResponse struct {
@@ -362,6 +405,7 @@ type torrentResponse struct {
 	DLRate       int64   `json:"dlspeed"`
 	UPRate       int64   `json:"upspeed"`
 	SavePath     string  `json:"save_path"`
+	ContentPath  string  `json:"content_path"`
 	Category     string  `json:"category"`
 	AutoTMM      bool    `json:"auto_tmm"`
 }
@@ -384,6 +428,7 @@ func (response torrentResponse) torrent() Torrent {
 		DLRate:       response.DLRate,
 		UPRate:       response.UPRate,
 		SavePath:     response.SavePath,
+		ContentPath:  response.ContentPath,
 		Category:     response.Category,
 		AutoTMM:      response.AutoTMM,
 	}

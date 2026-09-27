@@ -22,7 +22,8 @@ import (
 
 const (
 	defaultPollInterval = 250 * time.Millisecond
-	defaultPollTimeout  = 15 * time.Second
+	// Initialization and physical deletion can outlast the HTTP acknowledgement.
+	defaultPollTimeout = 60 * time.Second
 )
 
 type QBittorrent interface {
@@ -51,28 +52,46 @@ type Runner struct {
 	Now          func() time.Time
 	PollInterval time.Duration
 	PollTimeout  time.Duration
+	mutations    *[]Mutation
 }
 
 type Report struct {
-	Mode               string        `json:"mode"`
-	GeneratedAt        time.Time     `json:"generated_at"`
-	ConfigPath         string        `json:"config_path"`
-	DownloadPath       string        `json:"download_path"`
-	Budget             budget.Result `json:"budget"`
-	TorrentCount       int           `json:"torrent_count"`
-	CandidateCount     int           `json:"candidate_count"`
-	ProjectedUsedBytes int64         `json:"projected_used_bytes"`
-	PlanningHorizon    string        `json:"planning_horizon"`
-	ReplacementMargin  float64       `json:"replacement_margin"`
-	NetGain            float64       `json:"net_gain_score_bytes"`
-	Recoveries         []Recovery    `json:"recoveries,omitempty"`
-	Actions            []Action      `json:"actions"`
+	Mode               string             `json:"mode"`
+	GeneratedAt        time.Time          `json:"generated_at"`
+	ConfigPath         string             `json:"config_path"`
+	DownloadPath       string             `json:"download_path"`
+	Budget             budget.Result      `json:"budget"`
+	TorrentCount       int                `json:"torrent_count"`
+	CandidateCount     int                `json:"candidate_count"`
+	ProjectedUsedBytes int64              `json:"projected_used_bytes"`
+	PlanningHorizon    string             `json:"planning_horizon"`
+	ReplacementMargin  float64            `json:"replacement_margin"`
+	NetGain            float64            `json:"net_gain_score_bytes"`
+	Recoveries         []Recovery         `json:"recoveries,omitempty"`
+	Actions            []Action           `json:"actions"`
+	SkippedCandidates  []SkippedCandidate `json:"skipped_candidates,omitempty"`
+	Mutations          []Mutation         `json:"mutations,omitempty"`
+	Error              string             `json:"error,omitempty"`
+}
+
+// Mutation records an API acknowledgement, not proof that asynchronous work
+// has finished. An unconfirmed request may or may not have reached qBittorrent.
+type Mutation struct {
+	Operation   string   `json:"operation"`
+	Hashes      []string `json:"hashes"`
+	Status      string   `json:"status"`
+	DeleteFiles *bool    `json:"delete_files,omitempty"`
 }
 
 type Recovery struct {
 	Action string `json:"action"`
 	Hash   string `json:"hash"`
 	Name   string `json:"name"`
+}
+
+type SkippedCandidate struct {
+	CandidateID string `json:"candidate_id"`
+	Reason      string `json:"reason"`
 }
 
 type Action struct {
@@ -103,7 +122,17 @@ type snapshot struct {
 	budget       budget.Result
 }
 
-func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
+func (r Runner) Execute(ctx context.Context, apply bool) (report Report, runErr error) {
+	var resolved *candidateResolver
+	defer func() {
+		if resolved != nil {
+			report.SkippedCandidates = resolved.skipped
+		}
+		if runErr != nil {
+			report.Error = runErr.Error()
+		}
+	}()
+	r.mutations = &report.Mutations
 	if r.QBittorrent == nil || r.MTeam == nil {
 		return Report{}, errors.New("app: clients are required")
 	}
@@ -121,7 +150,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 
 	now := r.Now()
-	report := Report{Mode: "plan", GeneratedAt: now, ConfigPath: r.Config.Path, PlanningHorizon: r.Config.Policy.PlanningHorizon.String(), ReplacementMargin: r.Config.Policy.ReplacementMargin, Actions: []Action{}}
+	report = Report{Mode: "plan", GeneratedAt: now, ConfigPath: r.Config.Path, PlanningHorizon: r.Config.Policy.PlanningHorizon.String(), ReplacementMargin: r.Config.Policy.ReplacementMargin, Actions: []Action{}}
 	if apply {
 		report.Mode = "apply"
 	}
@@ -129,6 +158,10 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	if err != nil {
 		return report, err
 	}
+	report.DownloadPath = state.targetPath
+	report.Budget = state.budget
+	report.TorrentCount = len(state.all)
+	report.ProjectedUsedBytes = state.budget.UsedBytes
 	results, err := r.MTeam.Search(ctx)
 	if err != nil {
 		return report, fmt.Errorf("search M-Team freeleech torrents: %w", err)
@@ -139,8 +172,9 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		return report, err
 	}
 
-	resolved := candidateResolver{mteam: r.MTeam, byID: make(map[string]candidateMetainfo)}
-	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply, &resolved)
+	resolved = &candidateResolver{mteam: r.MTeam, byID: make(map[string]candidateMetainfo), exhausted: make(map[string]bool)}
+	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply, resolved)
+	report.Recoveries = recoveries
 	if err != nil {
 		return report, err
 	}
@@ -150,8 +184,6 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 			return report, fmt.Errorf("refresh qBittorrent after pending recovery: %w", err)
 		}
 	}
-	report.Recoveries = recoveries
-
 	report.DownloadPath = state.targetPath
 	report.Budget = state.budget
 	report.TorrentCount = len(state.all)
@@ -163,7 +195,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 		return report, nil
 	}
 
-	plan, err := r.buildPlan(ctx, now, candidates, state, &resolved)
+	plan, err := r.buildPlan(ctx, now, candidates, state, resolved)
 	if err != nil {
 		return report, fmt.Errorf("build portfolio plan: %w", err)
 	}
@@ -178,7 +210,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (Report, error) {
 	}
 
 	for index := range plan.Additions {
-		if err := r.applyAddition(ctx, plan.Additions[index], &resolved); err != nil {
+		if err := r.applyAddition(ctx, plan.Additions[index], resolved); err != nil {
 			return report, err
 		}
 		report.Actions[index].Applied = true
@@ -318,8 +350,7 @@ func (r Runner) optimizerConfig(limit int64) optimizer.Config {
 func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates []optimizer.Candidate, apply bool, resolved *candidateResolver) ([]Recovery, bool, error) {
 	var pending []qbittorrent.Torrent
 	for _, torrent := range state.all {
-		if torrent.Category == r.Config.QBittorrent.Category && torrent.AutoTMM &&
-			within(state.targetPath, torrent.SavePath) && emptyStoppedDownload(torrent) {
+		if r.isRecoverablePending(torrent, state.targetPath) {
 			pending = append(pending, torrent)
 		}
 	}
@@ -346,13 +377,16 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 		}
 		stale = append(stale, torrent)
 	}
-	if _, err := r.verifyPending(ctx, pending, state.targetPath); err != nil {
+	if _, err := r.verifyRecoverablePending(ctx, pending, state.targetPath); err != nil {
 		return recoveries, false, err
 	}
 	if len(stale) > 0 {
 		hashes := torrentHashes(stale)
-		if err := r.QBittorrent.Delete(ctx, hashes, true); err != nil {
+		if err := r.delete(ctx, hashes, false); err != nil {
 			return nil, false, fmt.Errorf("remove unverifiable pending torrents: %w", err)
+		}
+		if err := r.waitForRegistrationsRemoved(ctx, hashes); err != nil {
+			return recoveries, true, fmt.Errorf("confirm unverifiable pending torrents removed: %w", err)
 		}
 		for _, torrent := range stale {
 			recoveries = append(recoveries, Recovery{Action: "remove", Hash: torrent.Hash, Name: torrent.Name})
@@ -373,24 +407,34 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 			return recoveries, len(stale) > 0, fmt.Errorf("verify freeleech before resuming pending torrents: %w", err)
 		}
 	}
-	hashes, err := r.verifyPending(ctx, valid, state.targetPath)
-	if err != nil {
-		return recoveries, len(stale) > 0, err
-	}
 	if state.budget.UsedBytes <= state.budget.LimitBytes {
+		hashes, err := r.verifyRecoverablePendingForStart(ctx, valid, state.targetPath)
+		if err != nil {
+			return recoveries, len(stale) > 0, err
+		}
 		if !r.hasFreeleechTime(freeUntil) {
 			return recoveries, len(stale) > 0, errors.New("pending torrents no longer have the required freeleech time")
 		}
-		if err := r.QBittorrent.Start(ctx, hashes); err != nil {
+		if err := r.start(ctx, hashes); err != nil {
 			return recoveries, len(stale) > 0, fmt.Errorf("resume pending torrents: %w", err)
+		}
+		if err := r.waitForStarted(ctx, valid, state.targetPath); err != nil {
+			return recoveries, true, fmt.Errorf("confirm pending torrents resumed: %w", err)
 		}
 		for _, torrent := range valid {
 			recoveries = append(recoveries, Recovery{Action: "resume", Hash: torrent.Hash, Name: torrent.Name})
 		}
 		return recoveries, true, nil
 	}
-	if err := r.QBittorrent.Delete(ctx, hashes, true); err != nil {
-		return nil, false, fmt.Errorf("remove empty pending torrents: %w", err)
+	hashes, err := r.verifyRecoverablePending(ctx, valid, state.targetPath)
+	if err != nil {
+		return recoveries, len(stale) > 0, err
+	}
+	if err := r.delete(ctx, hashes, false); err != nil {
+		return recoveries, len(stale) > 0, fmt.Errorf("remove over-budget pending torrents: %w", err)
+	}
+	if err := r.waitForRegistrationsRemoved(ctx, hashes); err != nil {
+		return recoveries, true, fmt.Errorf("confirm over-budget pending torrents removed: %w", err)
 	}
 	for _, torrent := range valid {
 		recoveries = append(recoveries, Recovery{Action: "remove", Hash: torrent.Hash, Name: torrent.Name})
@@ -398,18 +442,73 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 	return recoveries, true, nil
 }
 
-func (r Runner) verifyPending(ctx context.Context, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
+func (r Runner) verifyRecoverablePending(ctx context.Context, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
 	current, err := r.QBittorrent.Torrents(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("refresh pending qBittorrent torrents before mutation: %w", err)
+		return nil, fmt.Errorf("refresh recoverable qBittorrent torrents before mutation: %w", err)
 	}
+	return r.verifyRecoverablePendingTorrents(current, expected, targetPath)
+}
+
+// A stopped torrent with zero verified progress may still refer to files used
+// by another torrent. All starts require a fresh budget and isolated content.
+func (r Runner) snapshotForStart(ctx context.Context, expected []qbittorrent.Torrent, targetPath string) (snapshot, error) {
+	state, err := r.snapshot(ctx)
+	if err != nil {
+		return snapshot{}, fmt.Errorf("refresh pending qBittorrent torrents before start: %w", err)
+	}
+	if !within(targetPath, state.targetPath) || !within(state.targetPath, targetPath) {
+		return snapshot{}, errors.New("qBittorrent category save path changed before start")
+	}
+	if err := validatePlannedUsed(state, 0, nil); err != nil {
+		return snapshot{}, fmt.Errorf("pending torrents no longer fit the current budget before start: %w", err)
+	}
+	if state.budget.FreeBytes-state.budget.OutstandingBytes < state.budget.RequiredFreeBytes {
+		return snapshot{}, errors.New("pending torrents cannot preserve the disk free-space reserve before start")
+	}
+	if err := verifyContentIsolation(state.all, torrentHashes(expected)); err != nil {
+		return snapshot{}, err
+	}
+	return state, nil
+}
+
+func (r Runner) verifyAddedPayloadForStart(ctx context.Context, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
+	state, err := r.snapshotForStart(ctx, expected, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	return r.verifyAddedPayloadTorrents(state.all, expected, targetPath)
+}
+
+func (r Runner) verifyRecoverablePendingForStart(ctx context.Context, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
+	state, err := r.snapshotForStart(ctx, expected, targetPath)
+	if err != nil {
+		return nil, err
+	}
+	return r.verifyRecoverablePendingTorrents(state.all, expected, targetPath)
+}
+
+func (r Runner) verifyAddedPayloadTorrents(current, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
 	for _, expectedTorrent := range expected {
 		torrent := findHash(current, expectedTorrent.Hash)
 		if torrent == nil {
-			return nil, fmt.Errorf("pending torrent %q disappeared before mutation", expectedTorrent.Hash)
+			return nil, fmt.Errorf("added torrent %q disappeared before mutation", expectedTorrent.Hash)
 		}
-		if !r.isPending(*torrent, targetPath) {
-			return nil, fmt.Errorf("pending torrent %q changed and is no longer safe to mutate", expectedTorrent.Hash)
+		if torrent.Size != expectedTorrent.Size || !r.isAddedPayload(*torrent, targetPath) {
+			return nil, fmt.Errorf("added torrent %q changed and is no longer safe to mutate", expectedTorrent.Hash)
+		}
+	}
+	return torrentHashes(expected), nil
+}
+
+func (r Runner) verifyRecoverablePendingTorrents(current, expected []qbittorrent.Torrent, targetPath string) ([]string, error) {
+	for _, expectedTorrent := range expected {
+		torrent := findHash(current, expectedTorrent.Hash)
+		if torrent == nil {
+			return nil, fmt.Errorf("recoverable pending torrent %q disappeared before mutation", expectedTorrent.Hash)
+		}
+		if torrent.Size != expectedTorrent.Size || !r.isRecoverablePending(*torrent, targetPath) {
+			return nil, fmt.Errorf("recoverable pending torrent %q changed and is no longer safe to mutate", expectedTorrent.Hash)
 		}
 	}
 	return torrentHashes(expected), nil
@@ -418,6 +517,16 @@ func (r Runner) verifyPending(ctx context.Context, expected []qbittorrent.Torren
 func (r Runner) isPending(torrent qbittorrent.Torrent, targetPath string) bool {
 	return torrent.Category == r.Config.QBittorrent.Category && torrent.AutoTMM &&
 		within(targetPath, torrent.SavePath) && emptyStoppedDownload(torrent)
+}
+
+func (r Runner) isRecoverablePending(torrent qbittorrent.Torrent, targetPath string) bool {
+	return torrent.Category == r.Config.QBittorrent.Category && torrent.AutoTMM &&
+		within(targetPath, torrent.SavePath) && stoppedIncompleteDownload(torrent)
+}
+
+func (r Runner) isAddedPayload(torrent qbittorrent.Torrent, targetPath string) bool {
+	return torrent.Category == r.Config.QBittorrent.Category && torrent.AutoTMM &&
+		within(targetPath, torrent.SavePath) && stoppedPayload(torrent)
 }
 
 func torrentHashes(torrents []qbittorrent.Torrent) []string {
@@ -434,8 +543,11 @@ func (r Runner) pendingCandidate(ctx context.Context, torrent qbittorrent.Torren
 			!r.hasFreeleechTime(candidate.FreeUntil) {
 			continue
 		}
-		info, err := resolved.resolve(ctx, candidate.ID)
+		info, err := resolved.resolve(ctx, candidate.ID, candidate.Size)
 		if err != nil {
+			if errors.Is(err, mteam.ErrTorrentDownloadLimit) {
+				continue
+			}
 			return nil, fmt.Errorf("recover pending torrent %s: %w", torrent.Hash, err)
 		}
 		if strings.EqualFold(info.hash, torrent.Hash) {
@@ -545,7 +657,7 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if !r.hasFreeleechTime(candidate.FreeUntil) {
 		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 	}
-	info, err := resolved.resolve(ctx, candidate.ID)
+	info, err := resolved.resolve(ctx, candidate.ID, candidate.Size)
 	if err != nil {
 		return err
 	}
@@ -561,17 +673,25 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if err := validatePlannedUsed(beforeAdd, candidate.Size, addition.Removals); err != nil {
 		return fmt.Errorf("candidate %s no longer fits the current budget: %w", candidate.ID, err)
 	}
-	if preallocate && candidate.Size > beforeAdd.budget.FreeBytes-beforeAdd.budget.RequiredFreeBytes {
-		return fmt.Errorf("candidate %s cannot be safely preallocated while preserving %d free bytes", candidate.ID, beforeAdd.budget.RequiredFreeBytes)
+	if preallocate {
+		available := beforeAdd.budget.FreeBytes - beforeAdd.budget.RequiredFreeBytes
+		if candidate.Size > available || beforeAdd.budget.OutstandingBytes > available-candidate.Size {
+			return fmt.Errorf("candidate %s cannot be safely preallocated while preserving %d free bytes and outstanding downloads", candidate.ID, beforeAdd.budget.RequiredFreeBytes)
+		}
 	}
 	if findHash(beforeAdd.all, hash) != nil {
 		return fmt.Errorf("candidate %s already exists in qBittorrent as %s", candidate.ID, hash)
 	}
-	if err := r.QBittorrent.Add(ctx, qbittorrent.AddRequest{
+	if err := r.verifyRemovals(addition.Removals, beforeAdd.all, beforeAdd.targetPath); err != nil {
+		return err
+	}
+	err = r.QBittorrent.Add(ctx, qbittorrent.AddRequest{
 		Metainfo: info.bytes, MetainfoName: candidate.ID + ".torrent",
 		SavePath: beforeAdd.targetPath, Category: r.Config.QBittorrent.Category,
 		Stopped: true, AutoTMM: true,
-	}); err != nil {
+	})
+	r.recordMutation("add", []string{hash}, err)
+	if err != nil {
 		return fmt.Errorf("add M-Team torrent %s to qBittorrent: %w", candidate.ID, err)
 	}
 	rollback := func(cause error) error {
@@ -581,8 +701,7 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if err != nil {
 		return rollback(fmt.Errorf("verify added M-Team torrent %s: %w", candidate.ID, err))
 	}
-	if added.Size != candidate.Size || !emptyStoppedDownload(*added) || added.Category != r.Config.QBittorrent.Category ||
-		!added.AutoTMM || !within(beforeAdd.targetPath, added.SavePath) {
+	if added.Size != candidate.Size || !r.isAddedPayload(*added, beforeAdd.targetPath) {
 		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, automatically managed category plan: state=%q size=%d (expected %d) amount_left=%d progress=%g category=%q auto_tmm=%t save_path=%q", candidate.ID, added.State, added.Size, candidate.Size, added.AmountLeft, added.Progress, added.Category, added.AutoTMM, added.SavePath))
 	}
 	var freeUntil time.Time
@@ -595,6 +714,13 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	afterAdd, err := r.snapshot(ctx)
 	if err != nil {
 		return rollback(fmt.Errorf("refresh qBittorrent after adding candidate %s: %w", candidate.ID, err))
+	}
+	expected := []qbittorrent.Torrent{{Hash: hash, Size: candidate.Size}}
+	if _, err := r.verifyAddedPayloadTorrents(afterAdd.all, expected, afterAdd.targetPath); err != nil {
+		return rollback(fmt.Errorf("verify candidate %s before replacement: %w", candidate.ID, err))
+	}
+	if err := verifyContentIsolation(afterAdd.all, []string{hash}); err != nil {
+		return rollback(fmt.Errorf("verify candidate %s content before replacement: %w", candidate.ID, err))
 	}
 	if err := validatePlannedUsed(afterAdd, 0, addition.Removals); err != nil {
 		return rollback(fmt.Errorf("candidate %s no longer fits the current budget: %w", candidate.ID, err))
@@ -610,11 +736,16 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 		for index, removal := range addition.Removals {
 			hashes[index] = removal.Hash
 		}
-		if err := r.QBittorrent.Delete(ctx, hashes, true); err != nil {
+		if err := r.delete(ctx, hashes, true); err != nil {
 			return fmt.Errorf("delete replaced torrents for candidate %s: %w", candidate.ID, err)
 		}
 	}
-	afterDelete, err := r.snapshot(ctx)
+	var afterDelete snapshot
+	if len(addition.Removals) > 0 {
+		afterDelete, err = r.waitForRemovals(ctx, addition.Removals)
+	} else {
+		afterDelete, err = r.snapshot(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("refresh qBittorrent after deleting replacements for candidate %s: %w", candidate.ID, err)
 	}
@@ -625,15 +756,18 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if err != nil {
 		return err
 	}
-	hashes, err := r.verifyPending(ctx, []qbittorrent.Torrent{{Hash: hash}}, afterDelete.targetPath)
+	hashes, err := r.verifyAddedPayloadForStart(ctx, expected, afterDelete.targetPath)
 	if err != nil {
 		return fmt.Errorf("verify candidate %s before starting it: %w", candidate.ID, err)
 	}
 	if !r.hasFreeleechTime(freeUntil) {
 		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
 	}
-	if err := r.QBittorrent.Start(ctx, hashes); err != nil {
+	if err := r.start(ctx, hashes); err != nil {
 		return fmt.Errorf("start candidate %s: %w", candidate.ID, err)
+	}
+	if err := r.waitForStarted(ctx, expected, afterDelete.targetPath); err != nil {
+		return fmt.Errorf("confirm candidate %s started: %w", candidate.ID, err)
 	}
 	return nil
 }
@@ -650,7 +784,7 @@ func (r Runner) rollbackPending(ctx context.Context, hash, targetPath, candidate
 	if !r.isPending(*torrent, targetPath) {
 		return errors.Join(cause, fmt.Errorf("refuse to roll back candidate %s because its category, Automatic Torrent Management, save path, or stopped-empty state changed", candidateID))
 	}
-	if err := r.QBittorrent.Delete(ctx, []string{hash}, true); err != nil {
+	if err := r.delete(ctx, []string{hash}, false); err != nil {
 		return errors.Join(cause, fmt.Errorf("roll back pending candidate %s: %w", candidateID, err))
 	}
 	return cause
@@ -676,20 +810,20 @@ func validatePlannedUsed(state snapshot, additionSize int64, removals []optimize
 }
 
 func (r Runner) waitForTorrent(ctx context.Context, hash string) (*qbittorrent.Torrent, []qbittorrent.Torrent, error) {
-	deadline := time.NewTimer(r.PollTimeout)
-	defer deadline.Stop()
+	pollCtx, cancel := context.WithTimeout(ctx, r.PollTimeout)
+	defer cancel()
 	ticker := time.NewTicker(r.PollInterval)
 	defer ticker.Stop()
 	lastState := ""
 	for {
-		torrents, err := r.QBittorrent.Torrents(ctx)
+		torrents, err := r.QBittorrent.Torrents(pollCtx)
 		if err != nil {
 			return nil, nil, err
 		}
 		if torrent := findHash(torrents, hash); torrent != nil {
 			lastState = torrent.State
 			switch strings.ToLower(torrent.State) {
-			case "checkingresumedata", "checkingdl":
+			case "checkingresumedata", "checkingdl", "checkingup":
 				// qBittorrent briefly checks resume data after a stopped add.
 				// Wait for its stable state before enforcing Swarmfolio's plan.
 			default:
@@ -697,9 +831,10 @@ func (r Runner) waitForTorrent(ctx context.Context, hash string) (*qbittorrent.T
 			}
 		}
 		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-deadline.C:
+		case <-pollCtx.Done():
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
 			if lastState == "" {
 				return nil, nil, fmt.Errorf("torrent %s did not appear within %s", hash, r.PollTimeout)
 			}
@@ -711,6 +846,7 @@ func (r Runner) waitForTorrent(ctx context.Context, hash string) (*qbittorrent.T
 
 func (r Runner) verifyRemovals(removals []optimizer.Removal, current []qbittorrent.Torrent, targetPath string) error {
 	now := r.Now()
+	hashes := make([]string, 0, len(removals))
 	for _, removal := range removals {
 		torrent := findHash(current, removal.Hash)
 		if torrent == nil {
@@ -722,13 +858,28 @@ func (r Runner) verifyRemovals(removals []optimizer.Removal, current []qbittorre
 			(!torrent.LastActivity.IsZero() && now.Sub(torrent.LastActivity) < r.Config.Policy.MinimumIdle) || busyState(torrent.State) {
 			return fmt.Errorf("planned removal %s changed and is no longer safe to delete", removal.Hash)
 		}
+		hashes = append(hashes, removal.Hash)
 	}
-	return nil
+	return verifyContentIsolation(current, hashes)
 }
 
 func emptyStoppedDownload(torrent qbittorrent.Torrent) bool {
 	state := strings.ToLower(torrent.State)
 	return torrent.Progress == 0 && torrent.AmountLeft == torrent.Size && (state == "stoppeddl" || state == "pauseddl")
+}
+
+func stoppedIncompleteDownload(torrent qbittorrent.Torrent) bool {
+	state := strings.ToLower(torrent.State)
+	return torrent.Progress >= 0 && torrent.Progress < 1 && torrent.AmountLeft > 0 && torrent.AmountLeft <= torrent.Size &&
+		(state == "stoppeddl" || state == "pauseddl")
+}
+
+func stoppedPayload(torrent qbittorrent.Torrent) bool {
+	state := strings.ToLower(torrent.State)
+	if state == "stoppeddl" || state == "pauseddl" {
+		return stoppedIncompleteDownload(torrent)
+	}
+	return (state == "stoppedup" || state == "pausedup") && torrent.Progress == 1 && torrent.AmountLeft == 0
 }
 
 func busyState(state string) bool {

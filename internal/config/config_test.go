@@ -121,6 +121,13 @@ func TestParseBytes(t *testing.T) {
 	}
 }
 
+func TestParseBytesRejectsInt64BoundaryOverflow(t *testing.T) {
+	t.Parallel()
+	if value, err := ParseBytes("9223372036854775808 B"); err == nil {
+		t.Fatalf("ParseBytes accepted 2^63 bytes as %d", value)
+	}
+}
+
 func TestParseRejectsUnknownAndMissingMTeamCredential(t *testing.T) {
 	t.Parallel()
 	if _, err := Parse([]byte("unknown = true\n")); err == nil {

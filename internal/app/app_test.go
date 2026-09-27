@@ -135,7 +135,7 @@ func TestExecuteStopsBeforeStartingWhenFreeBudgetChangesAfterDeletion(t *testing
 		return disk.Space{CapacityBytes: 100, FreeBytes: free}, nil
 	}
 	_, err := runner.Execute(context.Background(), true)
-	if err == nil || !strings.Contains(err.Error(), "after deletion") {
+	if err == nil || !strings.Contains(err.Error(), "wait for deletion and disk space") {
 		t.Fatalf("error = %v", err)
 	}
 	if len(qbt.torrents) != 1 || qbt.torrents[0].Name != "new" || qbt.torrents[0].State != "stoppedDL" ||
@@ -427,7 +427,7 @@ func TestExecuteRecoversSafePendingTorrent(t *testing.T) {
 		torrents: []qbittorrent.Torrent{{
 			Hash: hash, Name: "pending", Size: 30, AmountLeft: 30,
 			AddedOn: appNow.Add(-time.Hour), LastActivity: appNow.Add(-time.Hour),
-			SavePath: "/downloads/swarmfolio/pending", State: "stoppedDL",
+			SavePath: "/downloads/swarmfolio/pending", ContentPath: "/downloads/swarmfolio/pending", State: "stoppedDL",
 			Category: "swarmfolio", AutoTMM: true,
 		}},
 	}
@@ -560,7 +560,7 @@ func pendingQBT(hash string) *fakeQBT {
 		torrents: []qbittorrent.Torrent{{
 			Hash: hash, Name: "pending", Size: 30, AmountLeft: 30,
 			AddedOn: appNow.Add(-time.Hour), LastActivity: appNow.Add(-time.Hour),
-			SavePath: "/downloads/swarmfolio/pending", State: "stoppedDL",
+			SavePath: "/downloads/swarmfolio/pending", ContentPath: "/downloads/swarmfolio/pending", State: "stoppedDL",
 			Category: "swarmfolio", AutoTMM: true,
 		}},
 	}
@@ -599,7 +599,7 @@ func testServices(t *testing.T) (*fakeQBT, *fakeMTeam) {
 		torrents: []qbittorrent.Torrent{{
 			Hash: "old", Name: "old", Size: 70, Uploaded: 1, Progress: 1,
 			AddedOn: appNow.Add(-2 * time.Hour), LastActivity: appNow.Add(-2 * time.Hour),
-			SavePath: "/downloads/swarmfolio/old", State: "stoppedUP",
+			SavePath: "/downloads/swarmfolio/old", ContentPath: "/downloads/swarmfolio/old", State: "stoppedUP",
 			Category: "swarmfolio", AutoTMM: true,
 		}},
 	}
@@ -625,6 +625,7 @@ type fakeQBT struct {
 	freeSpace    func() (int64, error)
 	events       []string
 	mutations    int
+	deleteFiles  []bool
 }
 
 func (q *fakeQBT) Torrents(context.Context) ([]qbittorrent.Torrent, error) {
@@ -648,7 +649,7 @@ func (q *fakeQBT) Add(_ context.Context, request qbittorrent.AddRequest) error {
 	q.addSavePath = request.SavePath
 	q.torrents = append(q.torrents, qbittorrent.Torrent{
 		Hash: q.addHash, Name: "new", Size: q.addSize, AmountLeft: q.addSize,
-		AddedOn: appNow, LastActivity: appNow, SavePath: request.SavePath + "/new",
+		AddedOn: appNow, LastActivity: appNow, SavePath: request.SavePath + "/new", ContentPath: request.SavePath + "/new",
 		State: "stoppedDL", Category: request.Category, AutoTMM: request.AutoTMM,
 	})
 	if q.onAdd != nil {
@@ -656,7 +657,8 @@ func (q *fakeQBT) Add(_ context.Context, request qbittorrent.AddRequest) error {
 	}
 	return nil
 }
-func (q *fakeQBT) Delete(_ context.Context, hashes []string, _ bool) error {
+func (q *fakeQBT) Delete(_ context.Context, hashes []string, deleteFiles bool) error {
+	q.deleteFiles = append(q.deleteFiles, deleteFiles)
 	q.events = append(q.events, "delete:"+strings.Join(hashes, "|"))
 	q.mutations++
 	q.torrents = slices.DeleteFunc(q.torrents, func(torrent qbittorrent.Torrent) bool { return slices.Contains(hashes, torrent.Hash) })

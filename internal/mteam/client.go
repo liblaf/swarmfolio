@@ -13,9 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/liblaf/swarmfolio/internal/metainfo"
 )
 
 const defaultBaseURL = "https://api.m-team.cc"
+
+// ErrTorrentDownloadLimit means M-Team has exhausted this torrent's daily
+// metainfo download allowance. Other torrents may still be downloaded.
+var ErrTorrentDownloadLimit = errors.New("daily torrent download limit reached")
 
 // Config controls requests to the M-Team API. Timezone is an IANA location
 // name used for M-Team's zone-less discountEndTime values (for example,
@@ -128,7 +134,7 @@ func (c *Client) Search(ctx context.Context) ([]Torrent, error) {
 				return nil, err
 			}
 			request.Header.Set("Content-Type", "application/json")
-			response, err := c.httpClient.Do(request)
+			response, err := c.credentialedHTTPClient().Do(request)
 			if err != nil {
 				return nil, fmt.Errorf("mteam: search page %d discount %s: %w", page, discount, err)
 			}
@@ -182,7 +188,7 @@ func (c *Client) Download(ctx context.Context, id int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.httpClient.Do(request)
+	response, err := c.credentialedHTTPClient().Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("mteam: generate download token: %w", err)
 	}
@@ -200,20 +206,83 @@ func (c *Client) Download(ctx context.Context, id int64) ([]byte, error) {
 	}
 	downloadRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, tokenURL.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("mteam: create download request: %w", err)
+		return nil, fmt.Errorf("mteam: create download request: %w", redactTokenError(err))
 	}
-	downloadResponse, err := c.httpClient.Do(downloadRequest)
+	downloadResponse, err := c.downloadHTTPClient().Do(downloadRequest)
 	if err != nil {
-		return nil, fmt.Errorf("mteam: download torrent: %w", err)
+		return nil, fmt.Errorf("mteam: download torrent: %w", redactTokenError(err))
 	}
 	metainfo, err := readResponse(downloadResponse)
 	if err != nil {
+		return nil, fmt.Errorf("mteam: download torrent: %w", redactTokenError(err))
+	}
+	if err := downloadAPIError(metainfo); err != nil {
 		return nil, fmt.Errorf("mteam: download torrent: %w", err)
 	}
 	if err := validateTorrent(metainfo); err != nil {
 		return nil, fmt.Errorf("mteam: download torrent: %w", err)
 	}
 	return metainfo, nil
+}
+
+func downloadAPIError(payload []byte) error {
+	var response envelope
+	if json.Unmarshal(payload, &response) != nil {
+		return nil
+	}
+	code, err := parseCode(response.Code)
+	if err != nil || code == 0 {
+		return nil
+	}
+	// Code 1 also covers unrelated errors. Only this observed response proves
+	// the per-torrent daily allowance is exhausted; never suppress other errors.
+	if code == 1 && response.Message == "相同種子當天最多下載10次" {
+		return ErrTorrentDownloadLimit
+	}
+	return fmt.Errorf("download API error %d", code)
+}
+
+func (c *Client) credentialedHTTPClient() *http.Client {
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &client
+}
+
+func (c *Client) downloadHTTPClient() *http.Client {
+	client := *c.httpClient
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		request.Header.Del("Referer")
+		if request.URL.Scheme != "https" || request.URL.Host == "" {
+			return errors.New("mteam: download redirect must use HTTPS")
+		}
+		if checkRedirect != nil {
+			return checkRedirect(request, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("mteam: too many download redirects")
+		}
+		return nil
+	}
+	return &client
+}
+
+type tokenError struct {
+	err error
+}
+
+func (e tokenError) Error() string {
+	return "request failed"
+}
+
+func (e tokenError) Unwrap() error {
+	return e.err
+}
+
+func redactTokenError(err error) error {
+	return tokenError{err: err}
 }
 
 type searchRequest struct {
@@ -439,110 +508,8 @@ func validMode(mode string) bool {
 }
 
 func validateTorrent(data []byte) error {
-	parser := bencodeParser{data: data}
-	if len(data) == 0 || data[0] != 'd' {
-		return errors.New("response is not a bencoded torrent dictionary")
-	}
-	hasInfo, err := parser.dictionary()
-	if err != nil {
-		return fmt.Errorf("invalid bencode: %w", err)
-	}
-	if parser.pos != len(data) {
-		return errors.New("invalid bencode trailing data")
-	}
-	if !hasInfo {
-		return errors.New("torrent dictionary has no info key")
+	if _, err := metainfo.Inspect(data); err != nil {
+		return fmt.Errorf("invalid torrent metainfo: %w", err)
 	}
 	return nil
-}
-
-type bencodeParser struct {
-	data []byte
-	pos  int
-}
-
-func (p *bencodeParser) value() error {
-	if p.pos >= len(p.data) {
-		return errors.New("unexpected end")
-	}
-	switch p.data[p.pos] {
-	case 'i':
-		p.pos++
-		start := p.pos
-		if p.pos < len(p.data) && p.data[p.pos] == '-' {
-			p.pos++
-		}
-		for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
-			p.pos++
-		}
-		if start == p.pos || p.pos >= len(p.data) || p.data[p.pos] != 'e' {
-			return errors.New("invalid integer")
-		}
-		p.pos++
-		return nil
-	case 'l':
-		p.pos++
-		for p.pos < len(p.data) && p.data[p.pos] != 'e' {
-			if err := p.value(); err != nil {
-				return err
-			}
-		}
-		if p.pos >= len(p.data) {
-			return errors.New("unterminated list")
-		}
-		p.pos++
-		return nil
-	case 'd':
-		_, err := p.dictionary()
-		return err
-	default:
-		_, err := p.string()
-		return err
-	}
-}
-
-func (p *bencodeParser) dictionary() (bool, error) {
-	if p.pos >= len(p.data) || p.data[p.pos] != 'd' {
-		return false, errors.New("expected dictionary")
-	}
-	p.pos++
-	hasInfo := false
-	for p.pos < len(p.data) && p.data[p.pos] != 'e' {
-		key, err := p.string()
-		if err != nil {
-			return false, err
-		}
-		if string(key) == "info" {
-			hasInfo = true
-		}
-		if err := p.value(); err != nil {
-			return false, err
-		}
-	}
-	if p.pos >= len(p.data) {
-		return false, errors.New("unterminated dictionary")
-	}
-	p.pos++
-	return hasInfo, nil
-}
-
-func (p *bencodeParser) string() ([]byte, error) {
-	start := p.pos
-	for p.pos < len(p.data) && p.data[p.pos] >= '0' && p.data[p.pos] <= '9' {
-		p.pos++
-	}
-	if start == p.pos || p.pos >= len(p.data) || p.data[p.pos] != ':' {
-		return nil, errors.New("invalid string length")
-	}
-	length, err := strconv.Atoi(string(p.data[start:p.pos]))
-	if err != nil || length < 0 {
-		return nil, errors.New("invalid string length")
-	}
-	p.pos++
-	if length > len(p.data)-p.pos {
-		return nil, errors.New("truncated string")
-	}
-	value := p.data[p.pos : p.pos+length]
-	p.pos += length
-	return value, nil
 }

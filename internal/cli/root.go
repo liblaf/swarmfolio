@@ -112,16 +112,19 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 		return err
 	}
 	report, err := (app.Runner{Config: settings, QBittorrent: qbt, MTeam: mt}).Execute(ctx, apply)
-	if err != nil {
-		return err
-	}
+	return writeOutcome(o.stdout, report, jsonOutput, err)
+}
+
+func writeOutcome(writer io.Writer, report app.Report, jsonOutput bool, outcomeErr error) error {
+	var writeErr error
 	if jsonOutput {
-		encoder := json.NewEncoder(o.stdout)
+		encoder := json.NewEncoder(writer)
 		encoder.SetIndent("", "  ")
-		return encoder.Encode(report)
+		writeErr = encoder.Encode(report)
+	} else {
+		writeErr = writeReport(writer, report)
 	}
-	writeReport(o.stdout, report)
-	return nil
+	return errors.Join(outcomeErr, writeErr)
 }
 
 func (o *options) configCommand() *cobra.Command {
@@ -289,32 +292,68 @@ func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
 	return nil
 }
 
-func writeReport(writer io.Writer, report app.Report) {
-	fmt.Fprintf(writer, "Mode: %s\n", report.Mode)
-	fmt.Fprintf(writer, "Download disk: %s free; reserve %s\n",
-		formatBytes(report.Budget.FreeBytes), formatBytes(report.Budget.RequiredFreeBytes))
-	fmt.Fprintf(writer, "Portfolio: %s now; %s limit; %s projected\n",
-		formatBytes(report.Budget.UsedBytes), formatBytes(report.Budget.LimitBytes), formatBytes(report.ProjectedUsedBytes))
+func writeReport(writer io.Writer, report app.Report) error {
+	if _, err := fmt.Fprintf(writer, "Mode: %s\n", report.Mode); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Download disk: %s free; reserve %s\n", formatBytes(report.Budget.FreeBytes), formatBytes(report.Budget.RequiredFreeBytes)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(writer, "Portfolio: %s now; %s limit; %s projected\n", formatBytes(report.Budget.UsedBytes), formatBytes(report.Budget.LimitBytes), formatBytes(report.ProjectedUsedBytes)); err != nil {
+		return err
+	}
 	if report.PlanningHorizon != "" {
-		fmt.Fprintf(writer, "Credited-upload heuristic horizon: %s; replacement margin %.2f; net credit score %.0f bytes\n", report.PlanningHorizon, report.ReplacementMargin, report.NetGain)
+		if _, err := fmt.Fprintf(writer, "Credited-upload heuristic horizon: %s; replacement margin %.2f; net credit score %.0f bytes\n", report.PlanningHorizon, report.ReplacementMargin, report.NetGain); err != nil {
+			return err
+		}
+	}
+	for _, skipped := range report.SkippedCandidates {
+		if _, err := fmt.Fprintf(writer, "Skipped M-Team %s: %s\n", skipped.CandidateID, skipped.Reason); err != nil {
+			return err
+		}
 	}
 	for _, recovery := range report.Recoveries {
-		fmt.Fprintf(writer, "Recovered: %s %s (%s)\n", recovery.Action, recovery.Name, shortHash(recovery.Hash))
+		if _, err := fmt.Fprintf(writer, "Recovered: %s %s (%s)\n", recovery.Action, recovery.Name, shortHash(recovery.Hash)); err != nil {
+			return err
+		}
+	}
+	for _, mutation := range report.Mutations {
+		disposition := ""
+		if mutation.DeleteFiles != nil {
+			disposition = "; keep files"
+			if *mutation.DeleteFiles {
+				disposition = "; delete files"
+			}
+		}
+		if _, err := fmt.Fprintf(writer, "Mutation %s: %s (%s%s)\n", mutation.Operation, strings.Join(mutation.Hashes, ", "), mutation.Status, disposition); err != nil {
+			return err
+		}
 	}
 	for _, action := range report.Actions {
-		verb := "Add"
+		verb := "Planned addition (not completed)"
 		if action.Applied {
-			verb = "Added"
+			verb = "Applied addition"
 		}
-		fmt.Fprintf(writer, "%s: %s [M-Team %s, %s, %dL/%dS, opportunity %.3f, %dx credit, credit score %.0f bytes]\n",
-			verb, action.Name, action.CandidateID, formatBytes(action.SizeBytes), action.Leechers, action.Seeders, action.Opportunity, action.UploadMultiplier, action.UploadScore)
+		if _, err := fmt.Fprintf(writer, "%s: %s [M-Team %s, %s, %dL/%dS, opportunity %.3f, %dx credit, credit score %.0f bytes]\n", verb, action.Name, action.CandidateID, formatBytes(action.SizeBytes), action.Leechers, action.Seeders, action.Opportunity, action.UploadMultiplier, action.UploadScore); err != nil {
+			return err
+		}
 		for _, removal := range action.Removals {
-			fmt.Fprintf(writer, "  Replace: %s (%s, %s, credit score %.0f bytes)\n", removal.Name, shortHash(removal.Hash), formatBytes(removal.SizeBytes), removal.UploadScore)
+			if _, err := fmt.Fprintf(writer, "  Planned replacement: %s (%s, %s, credit score %.0f bytes)\n", removal.Name, shortHash(removal.Hash), formatBytes(removal.SizeBytes), removal.UploadScore); err != nil {
+				return err
+			}
 		}
 	}
-	if len(report.Actions) == 0 && len(report.Recoveries) == 0 {
-		fmt.Fprintln(writer, "No changes selected.")
+	if len(report.Actions) == 0 && len(report.Recoveries) == 0 && len(report.Mutations) == 0 {
+		if _, err := fmt.Fprintln(writer, "No changes selected."); err != nil {
+			return err
+		}
 	}
+	if report.Error != "" {
+		if _, err := fmt.Fprintf(writer, "Outcome error: %s\n", report.Error); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func formatBytes(bytes int64) string {

@@ -349,7 +349,8 @@ func ParseBytes(value string) (int64, error) {
 		"kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30, "tib": 1 << 40,
 	}
 	bytes := number * multipliers[strings.ToLower(match[2])]
-	if math.IsInf(bytes, 0) || bytes > math.MaxInt64 {
+	// MaxInt64 rounds up to 2^63 as a float64, so equality also overflows.
+	if math.IsInf(bytes, 0) || bytes >= math.MaxInt64 {
 		return 0, fmt.Errorf("byte size %q overflows int64", value)
 	}
 	return int64(math.Round(bytes)), nil
