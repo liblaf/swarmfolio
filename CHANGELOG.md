@@ -7,7 +7,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.0) - 2026-09-24
+## [v0.4.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.1) - 2026-09-27
+
+### 🐛 Bug Fixes
+
+- make unattended torrent replacement recover safely - [545b243](https://github.com/liblaf/swarmfolio/commit/545b24320665e61ef40c649212aa00077b12677b) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
+## [v0.4.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.0) - 2026-09-27
 
 ### 💥 BREAKING CHANGES
 
@@ -21,6 +31,7 @@ must accept either null or an expiry timestamp. - [a4f5beb](https://github.com/l
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.3.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.2) - 2026-09-24
