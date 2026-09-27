@@ -7,6 +7,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.0) - 2026-09-24
+
+### 💥 BREAKING CHANGES
+
+- **(mteam)** JSON reports no longer include skipped_without_expiry.
+The free_until field is null for offers with no scheduled end; consumers
+must accept either null or an expiry timestamp. - [a4f5beb](https://github.com/liblaf/swarmfolio/commit/a4f5beb60252730bd1699e5060e6bc8915ce5636) by [@liblaf](https://github.com/liblaf)
+
+### 🐛 Bug Fixes
+
+- **(mteam)** **\[breaking\]** accept freeleech offers without a scheduled end - [a4f5beb](https://github.com/liblaf/swarmfolio/commit/a4f5beb60252730bd1699e5060e6bc8915ce5636) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.3.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.2) - 2026-09-24
 
 ### 🐛 Bug Fixes
@@ -15,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.3.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.3.1) - 2026-09-21
