@@ -307,6 +307,11 @@ func writeReport(writer io.Writer, report app.Report) error {
 			return err
 		}
 	}
+	if report.Replans > 0 {
+		if _, err := fmt.Fprintf(writer, "Replanned remaining additions after budget changes: %d\n", report.Replans); err != nil {
+			return err
+		}
+	}
 	for _, skipped := range report.SkippedCandidates {
 		if _, err := fmt.Fprintf(writer, "Skipped M-Team %s: %s\n", skipped.CandidateID, skipped.Reason); err != nil {
 			return err

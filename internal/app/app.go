@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	defaultPollInterval = 250 * time.Millisecond
+	defaultPollInterval = time.Second
 	// Initialization and physical deletion can outlast the HTTP acknowledgement.
-	defaultPollTimeout = 60 * time.Second
+	defaultPollTimeout = 3 * time.Minute
 )
 
 type QBittorrent interface {
@@ -71,6 +71,7 @@ type Report struct {
 	Actions            []Action           `json:"actions"`
 	SkippedCandidates  []SkippedCandidate `json:"skipped_candidates,omitempty"`
 	Mutations          []Mutation         `json:"mutations,omitempty"`
+	Replans            int                `json:"replans,omitempty"`
 	Error              string             `json:"error,omitempty"`
 }
 
@@ -209,11 +210,8 @@ func (r Runner) Execute(ctx context.Context, apply bool) (report Report, runErr 
 		return report, nil
 	}
 
-	for index := range plan.Additions {
-		if err := r.applyAddition(ctx, plan.Additions[index], resolved); err != nil {
-			return report, err
-		}
-		report.Actions[index].Applied = true
+	if err := r.applyPlan(ctx, candidates, plan, resolved, &report); err != nil {
+		return report, err
 	}
 	final, err := r.snapshot(ctx)
 	if err != nil {
@@ -804,7 +802,7 @@ func validatePlannedUsed(state snapshot, additionSize int64, removals []optimize
 	}
 	projected := state.budget.UsedBytes + additionSize - reclaimed
 	if projected > state.budget.LimitBytes {
-		return fmt.Errorf("projected %d bytes exceeds current %d-byte limit", projected, state.budget.LimitBytes)
+		return &budgetExceededError{projected: projected, limit: state.budget.LimitBytes}
 	}
 	return nil
 }
