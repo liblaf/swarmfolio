@@ -16,6 +16,17 @@ func (transportTimeout) Error() string   { return "transport read timed out" }
 func (transportTimeout) Timeout() bool   { return true }
 func (transportTimeout) Temporary() bool { return true }
 
+type cancelingTransportTimeout struct {
+	cancel context.CancelFunc
+}
+
+func (e cancelingTransportTimeout) Error() string { return "transport read timed out" }
+func (e cancelingTransportTimeout) Timeout() bool {
+	e.cancel()
+	return true
+}
+func (cancelingTransportTimeout) Temporary() bool { return true }
+
 type timeoutAfterDeleteQBT struct {
 	*fakeQBT
 	remainingTimeouts  int
@@ -130,6 +141,26 @@ func TestWaitForRemovalsStopsWhenParentContextIsCanceled(t *testing.T) {
 	}
 }
 
+func TestExecuteStopsWhenTimeoutCancelsParentDuringDeletionVerification(t *testing.T) {
+	t.Parallel()
+	base, mt := testServices(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	qbt := &cancelOnTimeoutAfterDeleteQBT{fakeQBT: base, cancel: cancel}
+	runner := deletionTestRunner(t, base, qbt, mt)
+
+	report, err := runner.Execute(ctx, true)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(report.Actions) != 1 || report.Actions[0].Applied || eventCount(qbt.events, "delete:old") != 1 || prefixIndex(qbt.events, "start:") >= 0 {
+		t.Fatalf("unsafe mutation after deadline-boundary cancellation: report=%#v events=%v", report, qbt.events)
+	}
+	if len(qbt.torrents) != 1 || qbt.torrents[0].State != "stoppedDL" {
+		t.Fatalf("pending addition was not retained stopped: %#v", qbt.torrents)
+	}
+}
+
 func eventCount(events []string, want string) int {
 	count := 0
 	for _, event := range events {
@@ -144,6 +175,24 @@ type nonTimeoutAfterDeleteQBT struct {
 	*fakeQBT
 	err     error
 	deleted bool
+}
+
+type cancelOnTimeoutAfterDeleteQBT struct {
+	*fakeQBT
+	cancel  context.CancelFunc
+	deleted bool
+}
+
+func (q *cancelOnTimeoutAfterDeleteQBT) Delete(ctx context.Context, hashes []string, deleteFiles bool) error {
+	q.deleted = true
+	return q.fakeQBT.Delete(ctx, hashes, deleteFiles)
+}
+
+func (q *cancelOnTimeoutAfterDeleteQBT) Torrents(ctx context.Context) ([]qbittorrent.Torrent, error) {
+	if q.deleted {
+		return nil, cancelingTransportTimeout{cancel: q.cancel}
+	}
+	return q.fakeQBT.Torrents(ctx)
 }
 
 func (q *nonTimeoutAfterDeleteQBT) Delete(ctx context.Context, hashes []string, deleteFiles bool) error {

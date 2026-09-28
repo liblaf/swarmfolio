@@ -24,7 +24,7 @@ func (r Runner) waitForRegistrationsRemoved(ctx context.Context, hashes []string
 			if pollCtx.Err() != nil {
 				return fmt.Errorf("wait for qBittorrent to remove registrations within %s: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
 			}
-			if !retryableReadTimeout(pollCtx, err) {
+			if !retryableReadTimeout(err) {
 				return fmt.Errorf("list qBittorrent torrents while waiting for registration removal: %w", err)
 			}
 			select {
@@ -65,7 +65,7 @@ func (r Runner) waitForRemovals(ctx context.Context, removals []optimizer.Remova
 			if pollCtx.Err() != nil {
 				return snapshot{}, fmt.Errorf("wait for deletion and disk space within %s: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
 			}
-			if !retryableReadTimeout(pollCtx, err) {
+			if !retryableReadTimeout(err) {
 				return snapshot{}, fmt.Errorf("read qBittorrent state while waiting for deletion: %w", err)
 			}
 			select {
@@ -99,13 +99,10 @@ func (r Runner) waitForRemovals(ctx context.Context, removals []optimizer.Remova
 	}
 }
 
-// retryableReadTimeout accepts only a lower-level transport deadline while the
-// caller's polling budget remains live. A completed poll context is the final
-// deadline, never a reason to keep polling.
-func retryableReadTimeout(ctx context.Context, err error) bool {
-	if ctx.Err() != nil {
-		return false
-	}
+// Classify the read error independently of the polling deadline. Callers handle
+// context expiry before classification and while waiting to retry; rechecking
+// it here could misclassify a timeout if the deadline expires between checks.
+func retryableReadTimeout(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
