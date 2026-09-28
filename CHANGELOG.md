@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.3](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.3) - 2026-09-28
+
+### 🐛 Bug Fixes
+
+- preserve polling deadlines during timeout classification - [b600ac0](https://github.com/liblaf/swarmfolio/commit/b600ac062b82838d87106b56299bddbf86605834) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.4.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.2) - 2026-09-28
 
 ### 🐛 Bug Fixes
@@ -15,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.4.1](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.1) - 2026-09-27
