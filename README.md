@@ -26,7 +26,7 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 - New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On each applied run, stopped incomplete downloads in the category, including partial downloads, are verified against current M-Team metainfo before they are resumed or their registrations are removed.
 - Before starting a torrent or deleting completed content, Swarmfolio rejects overlapping content paths across all categories. Missing content paths stop the action because isolation cannot be verified.
 - Removing a pending torrent or rolling back an addition always retains its files (`deleteFiles=false`): zero verified progress does not prove that the files are absent or unshared. Retained files continue to consume disk space and may require manual cleanup.
-- Before deleting replacements, Swarmfolio rechecks that the new torrent is still stopped and correctly managed. Matching retained partial or complete data can be reused after its identity, size, and content isolation are verified. After deletion, it waits up to three minutes for the removed torrents to disappear and the reported disk space to preserve the reserve, retrying temporary read timeouts within that window. A timeout leaves the new torrent stopped; the installed service retries automatically after one minute, rechecks qBittorrent and current freeleech offers, and resumes or replans the pending addition.
+- Before deleting replacements, Swarmfolio rechecks that the new torrent is still stopped and correctly managed. Matching retained partial or complete data can be reused after its identity, size, and content isolation are verified. After deletion, it waits up to ten minutes (`qbittorrent.poll_timeout`) for the removed torrents to disappear and the reported disk space to preserve the reserve, retrying temporary read timeouts within that window. A timeout leaves the new torrent stopped; the installed service retries automatically, rechecks qBittorrent and current freeleech offers, and resumes or replans the pending addition. A retry that finds the pending addition over budget first waits the same window for space reclaimed by the interrupted run to appear, so it does not delete further replacements for the same offer.
 - Preallocated additions must fit alongside all existing unfinished download commitments before any replacement data is deleted.
 - Torrent identity and payload size are checked against the downloaded metainfo before adding it, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
 - Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently.
@@ -93,9 +93,10 @@ For a different WebUI address or authenticated access, add:
 [qbittorrent]
 base_url = "http://localhost:8080"
 api-key = "your-qbittorrent-api-key" # Omit when authentication is not required.
+poll_timeout = "10m" # How long to wait for qBittorrent to settle after each change.
 ```
 
-The disk limit subtracts every unfinished byte already promised to qBittorrent from free space before reserving 1 TiB (1,099,511,627,776 bytes). Total disk capacity and Docker access are not needed. qBittorrent caches its API free-space value, so Swarmfolio polls once per second after deletion until the reported space permits the download, with a three-minute timeout that leaves the addition stopped until automatic recovery. Temporary read timeouts are retried within that window; malformed responses and other API errors still fail immediately. The reserve is checked against that estimate; recent disk writes may not yet appear in it.
+The disk limit subtracts every unfinished byte already promised to qBittorrent from free space before reserving 1 TiB (1,099,511,627,776 bytes). Total disk capacity and Docker access are not needed. qBittorrent caches its API free-space value, so Swarmfolio polls after deletion until the reported space permits the download, starting at one-second intervals and backing off to fifteen seconds so a stalled qBittorrent is not flooded with requests. The wait is bounded by `qbittorrent.poll_timeout` (default ten minutes) and leaves the addition stopped until automatic recovery. The same bound applies while waiting for an addition to initialize or start. Temporary read timeouts are retried within that window; malformed responses and other API errors still fail immediately. A busy download disk can stall qBittorrent's Web API for minutes after a delete; a timeout error states the last condition observed, or that no read succeeded during the wait. The reserve is checked against that estimate; recent disk writes may not yet appear in it.
 
 If a refreshed budget no longer permits the next addition before any mutation is attempted for it, Swarmfolio rebuilds the remaining plan from current qBittorrent state. Completed additions and removals count toward the original per-run action limits. The report preserves completed actions, replaces the unexecuted plan, and records the number of budget changes under `replans`. At most three such replans are allowed per run; continued changes fail visibly. Budget failures after an addition has begun retain the existing rollback or pending-recovery behavior.
 
@@ -143,7 +144,7 @@ systemctl --user list-timers swarmfolio.timer
 
 `systemd install` writes the embedded units, reloads the user systemd manager, and enables and starts `swarmfolio.timer`. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried.
 
-The timer performs routine optimization hourly. If a run fails, the service retries automatically after one minute and continues retrying without a start-limit lockout. Each retry rebuilds its decisions from current qBittorrent state and M-Team offers; it can resume a valid pending addition, remove a stale registration while retaining its files, or replan an interrupted replacement. An API response lost after a successful operation is reconciled from the next snapshot. No manual torrent start or recovery command is needed for these interrupted runs. Errors remain visible in `journalctl --user -u swarmfolio.service`.
+The timer performs routine optimization hourly. If a run fails, the service retries automatically after one minute, backing off to at most thirty minutes between consecutive failures, and continues retrying without a start-limit lockout. The backoff requires systemd 254 or newer; older versions ignore it and retry every minute. Each retry rebuilds its decisions from current qBittorrent state and M-Team offers; it can resume a valid pending addition, remove a stale registration while retaining its files, or replan an interrupted replacement. An API response lost after a successful operation is reconciled from the next snapshot. No manual torrent start or recovery command is needed for these interrupted runs. Errors remain visible in `journalctl --user -u swarmfolio.service`.
 
 When upgrading an existing installation, `swarmfolio systemd install --force` installs the updated retry policy and keeps the hourly timer enabled. The standalone `run --apply` command still performs one pass; the installed service supplies automatic retries.
 
@@ -184,7 +185,12 @@ Optional policy overrides:
 [policy]
 planning_horizon = "24h"
 replacement_margin = 1.25 # Must be finite and at least 1.
+max_incomplete_downloads = 6 # Optional; unset means no cap.
 ```
+
+`max_incomplete_downloads` limits how many managed torrents may be unfinished at once, including stopped pending additions. A run adds no more torrents than that limit leaves room for. Concurrent downloads share one disk, and on a hard drive many of them can starve seeding and stall qBittorrent.
+
+When an addition needs several removals, the least valuable selected incumbents are deleted first, so an interrupted run has spent the cheapest part of its removal set.
 
 Offers with no scheduled end use the full promotion multiplier throughout the planning horizon. Their JSON `free_until` is `null`; timed offers retain an expiry timestamp.
 
@@ -192,7 +198,7 @@ The JSON report exposes `upload_score_bytes` for additions and removals, `planni
 
 The read-only `plan` command requests download tokens and reads selected candidates' metainfo to verify their infohashes, without mutating qBittorrent. `run --apply` also resolves interrupted additions, reuses verified metainfo within the run, uploads additions stopped, waits for initialization, and rechecks category ownership and size before performing the replacement.
 
-M-Team limits each torrent's metainfo downloads to ten per day. If it reports that this allowance is exhausted, Swarmfolio lists the affected ID under `skipped_candidates` (or `Skipped M-Team` in text output), excludes it for the current run, and replans using other verified freeleech offers. A later scheduled run can try that torrent again. This specific quota response does not block the whole portfolio; other API, authentication, network, or malformed-metadata errors still stop the run visibly.
+M-Team limits each torrent's metainfo downloads to ten per day. If it reports that this allowance is exhausted, Swarmfolio lists the affected ID under `skipped_candidates` (or `Skipped M-Team` in text output), excludes it for the current run, and replans using other verified freeleech offers. A later scheduled run can try that torrent again. This specific quota response does not block the whole portfolio. Likewise, if the metainfo download itself returns an M-Team API error code, the offer is skipped for the run with its code, and planning continues; more than three such refusals in one run stop it, because they suggest an account-wide problem. While recovering a pending addition, such a refusal stops the run instead, because it may be transient and concern the pending torrent's own offer. Other API, authentication, network, or malformed-metadata errors still stop the run visibly.
 
 ## ⌨️ Development and Releases
 

@@ -19,18 +19,29 @@ type candidateMetainfo struct {
 	bytes []byte
 }
 
+// A refused metainfo download usually concerns one torrent, but repeated
+// refusals in one run suggest an account-wide problem that must stop the run.
+const maxRefusedCandidates = 3
+
 // candidateResolver shares verified metainfo across recovery, planning, and
-// apply within one run. Display names are not torrent identities.
+// apply within one run. Display names are not torrent identities. Offers that
+// M-Team refuses to serve are excluded for the rest of the run; excluded keeps
+// the download error so later lookups report the same cause.
 type candidateResolver struct {
-	mteam     MTeam
-	byID      map[string]candidateMetainfo
-	exhausted map[string]bool
-	skipped   []SkippedCandidate
+	mteam    MTeam
+	byID     map[string]candidateMetainfo
+	excluded map[string]error
+	refused  int
+	skipped  []SkippedCandidate
+}
+
+func newCandidateResolver(mt MTeam) *candidateResolver {
+	return &candidateResolver{mteam: mt, byID: make(map[string]candidateMetainfo), excluded: make(map[string]error)}
 }
 
 func (r *candidateResolver) resolve(ctx context.Context, id string, expectedSize int64) (candidateMetainfo, error) {
-	if r.exhausted[id] {
-		return candidateMetainfo{}, mteam.ErrTorrentDownloadLimit
+	if err := r.excluded[id]; err != nil {
+		return candidateMetainfo{}, err
 	}
 	if info, ok := r.byID[id]; ok {
 		if info.size != expectedSize {
@@ -40,10 +51,16 @@ func (r *candidateResolver) resolve(ctx context.Context, id string, expectedSize
 	}
 	data, err := r.mteam.Download(ctx, mustInt64(id))
 	if err != nil {
-		if errors.Is(err, mteam.ErrTorrentDownloadLimit) {
-			r.excludeDownloadLimited(id)
+		err = fmt.Errorf("download M-Team torrent %s: %w", id, err)
+		var refused *mteam.DownloadRefusedError
+		switch {
+		case errors.Is(err, mteam.ErrTorrentDownloadLimit):
+			r.exclude(id, "daily torrent download limit reached", err)
+		case errors.As(err, &refused) && r.refused < maxRefusedCandidates:
+			r.refused++
+			r.exclude(id, fmt.Sprintf("M-Team refused the metainfo download with API error %d", refused.Code), err)
 		}
-		return candidateMetainfo{}, fmt.Errorf("download M-Team torrent %s: %w", id, err)
+		return candidateMetainfo{}, err
 	}
 	inspected, err := metainfo.Inspect(data)
 	if err != nil {
@@ -57,12 +74,12 @@ func (r *candidateResolver) resolve(ctx context.Context, id string, expectedSize
 	return info, nil
 }
 
-func (r *candidateResolver) excludeDownloadLimited(id string) {
-	if r.exhausted[id] {
+func (r *candidateResolver) exclude(id, reason string, cause error) {
+	if r.excluded[id] != nil {
 		return
 	}
-	r.exhausted[id] = true
-	r.skipped = append(r.skipped, SkippedCandidate{CandidateID: id, Reason: "daily torrent download limit reached"})
+	r.excluded[id] = cause
+	r.skipped = append(r.skipped, SkippedCandidate{CandidateID: id, Reason: reason})
 }
 
 // buildPlan resolves only selected offers, excluding hashes already present in
@@ -72,9 +89,9 @@ func (r Runner) buildPlan(ctx context.Context, now time.Time, candidates []optim
 	candidates = slices.Clone(candidates)
 	for {
 		candidates = slices.DeleteFunc(candidates, func(candidate optimizer.Candidate) bool {
-			return resolved.exhausted[candidate.ID]
+			return resolved.excluded[candidate.ID] != nil
 		})
-		plan, err := optimizer.Build(now, candidates, state.forOptimizer, r.optimizerConfig(state.budget.LimitBytes))
+		plan, err := optimizer.Build(now, candidates, state.forOptimizer, r.planConfig(state))
 		if err != nil {
 			return optimizer.Plan{}, err
 		}
@@ -86,7 +103,7 @@ func (r Runner) buildPlan(ctx context.Context, now time.Time, candidates []optim
 		for _, addition := range plan.Additions {
 			info, err := resolved.resolve(ctx, addition.Candidate.ID, addition.Candidate.Size)
 			if err != nil {
-				if errors.Is(err, mteam.ErrTorrentDownloadLimit) {
+				if resolved.excluded[addition.Candidate.ID] != nil {
 					excluded[addition.Candidate.ID] = true
 					continue
 				}
@@ -105,4 +122,21 @@ func (r Runner) buildPlan(ctx context.Context, now time.Time, candidates []optim
 			return excluded[candidate.ID]
 		})
 	}
+}
+
+// planConfig applies run-wide limits that depend on current qBittorrent state.
+// Unfinished managed torrents compete for the same disk and bandwidth, so the
+// optional cap on them also bounds how many additions this plan may start.
+func (r Runner) planConfig(state snapshot) optimizer.Config {
+	cfg := r.optimizerConfig(state.budget.LimitBytes)
+	if limit := r.Config.Policy.MaxIncompleteDownloads; limit > 0 {
+		incomplete := 0
+		for _, torrent := range state.forOptimizer {
+			if torrent.Progress < 1 {
+				incomplete++
+			}
+		}
+		cfg.MaxAdditions = min(cfg.MaxAdditions, max(0, limit-incomplete))
+	}
+	return cfg
 }

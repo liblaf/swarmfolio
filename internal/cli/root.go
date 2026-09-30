@@ -111,7 +111,7 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 	if err != nil {
 		return err
 	}
-	report, err := (app.Runner{Config: settings, QBittorrent: qbt, MTeam: mt}).Execute(ctx, apply)
+	report, err := (app.Runner{Config: settings, QBittorrent: qbt, MTeam: mt, PollTimeout: settings.QBittorrent.PollTimeout}).Execute(ctx, apply)
 	return writeOutcome(o.stdout, report, jsonOutput, err)
 }
 

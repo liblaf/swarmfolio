@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefaultPathUsesUserConfigDirectory(t *testing.T) {
@@ -270,13 +271,15 @@ api_key = "mteam-secret"
 	if settings.Portfolio.MinimumFreeBytes != 1<<40 || settings.MTeam.BaseURL != "https://api.m-team.cc" ||
 		settings.QBittorrent.BaseURL != "http://localhost:8080" || settings.QBittorrent.APIKey != "" ||
 		settings.MTeam.Mode != "normal" || settings.MTeam.PageSize != 100 || settings.MTeam.Pages != 1 ||
-		settings.MTeam.Location.String() != "Asia/Shanghai" || settings.HTTPTimeout.String() != "30s" {
+		settings.MTeam.Location.String() != "Asia/Shanghai" || settings.HTTPTimeout.String() != "30s" ||
+		settings.QBittorrent.PollTimeout.String() != "10m0s" {
 		t.Fatalf("unexpected defaults: %#v", settings)
 	}
 	if settings.Policy.CandidateMaxAge.String() != "72h0m0s" || settings.Policy.PlanningHorizon.String() != "24h0m0s" || settings.Policy.MinimumFreeleechRemaining.String() != "2h0m0s" ||
 		settings.Policy.MinimumLeechers != 1 || settings.Policy.MinimumOpportunityRatio != 0.1 ||
 		settings.Policy.MinimumResidency.String() != "24h0m0s" || settings.Policy.MinimumIdle.String() != "6h0m0s" ||
-		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 || settings.Policy.ReplacementMargin != 1.25 {
+		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 || settings.Policy.ReplacementMargin != 1.25 ||
+		settings.Policy.MaxIncompleteDownloads != 0 {
 		t.Fatalf("unexpected policy defaults: %#v", settings.Policy)
 	}
 }
@@ -294,6 +297,34 @@ func TestParseRejectsInvalidCreditedUploadPolicy(t *testing.T) {
 			_, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[policy]\n" + policy + "\n"))
 			if err == nil {
 				t.Fatalf("Parse() accepted invalid policy %q", policy)
+			}
+		})
+	}
+}
+
+func TestParseAcceptsQBittorrentWaitAndIncompleteDownloadCap(t *testing.T) {
+	t.Parallel()
+	settings, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[qbittorrent]\npoll_timeout = \"15m\"\n[policy]\nmax_incomplete_downloads = 6\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.QBittorrent.PollTimeout != 15*time.Minute || settings.Policy.MaxIncompleteDownloads != 6 {
+		t.Fatalf("poll timeout=%s max incomplete downloads=%d", settings.QBittorrent.PollTimeout, settings.Policy.MaxIncompleteDownloads)
+	}
+}
+
+func TestParseRejectsInvalidQBittorrentWaitAndIncompleteDownloadCap(t *testing.T) {
+	t.Parallel()
+	for _, extra := range []string{
+		"[qbittorrent]\npoll_timeout = \"0s\"",
+		"[qbittorrent]\npoll_timeout = \"soon\"",
+		"[policy]\nmax_incomplete_downloads = 0",
+		"[policy]\nmax_incomplete_downloads = -1",
+	} {
+		t.Run(extra, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n" + extra + "\n")); err == nil {
+				t.Fatalf("Parse() accepted %q", extra)
 			}
 		})
 	}
