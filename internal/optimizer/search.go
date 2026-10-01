@@ -113,7 +113,12 @@ func selectPortfolio(now time.Time, candidates []Candidate, eligible []Torrent, 
 		}
 		return strings.Compare(candidates[a].ID, candidates[b].ID)
 	})
-	remaining := best.removals
+	// Spend the least valuable incumbents first, so an interrupted run has
+	// deleted the cheapest part of the selected removal set.
+	remaining := slices.Clone(best.removals)
+	slices.SortStableFunc(remaining, func(a, b int) int {
+		return cmpFloat(retentionScore(now, eligible[a], cfg.PlanningHorizon), retentionScore(now, eligible[b], cfg.PlanningHorizon))
+	})
 	for _, index := range best.additions {
 		c := candidates[index]
 		addition := Addition{Candidate: c, UploadScore: candidateScore(now, c, cfg.PlanningHorizon)}

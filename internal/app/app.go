@@ -22,8 +22,9 @@ import (
 
 const (
 	defaultPollInterval = time.Second
-	// Initialization and physical deletion can outlast the HTTP acknowledgement.
-	defaultPollTimeout = 3 * time.Minute
+	// Initialization and physical deletion can outlast the HTTP acknowledgement,
+	// especially while a busy disk stalls qBittorrent's Web API.
+	defaultPollTimeout = 10 * time.Minute
 )
 
 type QBittorrent interface {
@@ -173,7 +174,7 @@ func (r Runner) Execute(ctx context.Context, apply bool) (report Report, runErr 
 		return report, err
 	}
 
-	resolved = &candidateResolver{mteam: r.MTeam, byID: make(map[string]candidateMetainfo), exhausted: make(map[string]bool)}
+	resolved = newCandidateResolver(r.MTeam)
 	recoveries, changed, err := r.recoverPending(ctx, state, candidates, apply, resolved)
 	report.Recoveries = recoveries
 	if err != nil {
@@ -196,7 +197,9 @@ func (r Runner) Execute(ctx context.Context, apply bool) (report Report, runErr 
 		return report, nil
 	}
 
-	plan, err := r.buildPlan(ctx, now, candidates, state, resolved)
+	// Recovery can wait for qBittorrent, so judge offer eligibility at the
+	// time of planning rather than at the start of the run.
+	plan, err := r.buildPlan(ctx, r.Now(), candidates, state, resolved)
 	if err != nil {
 		return report, fmt.Errorf("build portfolio plan: %w", err)
 	}
@@ -398,6 +401,18 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 	if len(valid) == 0 {
 		return recoveries, len(stale) > 0, nil
 	}
+	if state.budget.UsedBytes > state.budget.LimitBytes {
+		fitted, err := r.waitForPendingBudget(ctx)
+		var timeout *pollTimeoutError
+		switch {
+		case err == nil:
+			state = fitted
+		case errors.As(err, &timeout) && timeout.pending != nil:
+			// The budget was observed and stayed short; remove the registrations below.
+		default:
+			return recoveries, len(stale) > 0, fmt.Errorf("refresh qBittorrent before judging pending torrents over budget: %w", err)
+		}
+	}
 	var freeUntil time.Time
 	if state.budget.UsedBytes <= state.budget.LimitBytes {
 		freeUntil, err = r.verifyFreeleech(ctx, validCandidates)
@@ -543,6 +558,9 @@ func (r Runner) pendingCandidate(ctx context.Context, torrent qbittorrent.Torren
 		}
 		info, err := resolved.resolve(ctx, candidate.ID, candidate.Size)
 		if err != nil {
+			// The daily quota is the one known per-torrent refusal. Any other
+			// failure may be transient and may concern this torrent's own offer,
+			// so stop instead of judging a valid pending torrent stale.
 			if errors.Is(err, mteam.ErrTorrentDownloadLimit) {
 				continue
 			}
@@ -808,38 +826,30 @@ func validatePlannedUsed(state snapshot, additionSize int64, removals []optimize
 }
 
 func (r Runner) waitForTorrent(ctx context.Context, hash string) (*qbittorrent.Torrent, []qbittorrent.Torrent, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, r.PollTimeout)
-	defer cancel()
-	ticker := time.NewTicker(r.PollInterval)
-	defer ticker.Stop()
-	lastState := ""
-	for {
-		torrents, err := r.QBittorrent.Torrents(pollCtx)
+	var found *qbittorrent.Torrent
+	var torrents []qbittorrent.Torrent
+	err := r.poll(ctx, "wait for added torrent to initialize", func(ctx context.Context) (error, error) {
+		var err error
+		torrents, err = r.QBittorrent.Torrents(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		if torrent := findHash(torrents, hash); torrent != nil {
-			lastState = torrent.State
-			switch strings.ToLower(torrent.State) {
-			case "checkingresumedata", "checkingdl", "checkingup":
-				// qBittorrent briefly checks resume data after a stopped add.
-				// Wait for its stable state before enforcing Swarmfolio's plan.
-			default:
-				return torrent, torrents, nil
-			}
+		found = findHash(torrents, hash)
+		if found == nil {
+			return fmt.Errorf("torrent %s did not appear", hash), nil
 		}
-		select {
-		case <-pollCtx.Done():
-			if ctx.Err() != nil {
-				return nil, nil, ctx.Err()
-			}
-			if lastState == "" {
-				return nil, nil, fmt.Errorf("torrent %s did not appear within %s", hash, r.PollTimeout)
-			}
-			return nil, nil, fmt.Errorf("torrent %s did not leave transient checking state %q within %s", hash, lastState, r.PollTimeout)
-		case <-ticker.C:
+		switch strings.ToLower(found.State) {
+		case "checkingresumedata", "checkingdl", "checkingup":
+			// qBittorrent briefly checks resume data after a stopped add.
+			// Wait for its stable state before enforcing Swarmfolio's plan.
+			return fmt.Errorf("torrent %s did not leave transient checking state %q", hash, found.State), nil
 		}
+		return nil, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
+	return found, torrents, nil
 }
 
 func (r Runner) verifyRemovals(removals []optimizer.Removal, current []qbittorrent.Torrent, targetPath string) error {

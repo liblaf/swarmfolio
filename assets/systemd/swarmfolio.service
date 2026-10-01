@@ -4,16 +4,20 @@ Documentation=https://github.com/liblaf/swarmfolio
 Wants=network-online.target
 After=network-online.target
 # Retry indefinitely: a transient qBittorrent or M-Team failure must not leave
-# the optimizer stopped until the next hourly timer activation.
+# the optimizer stopped until the next hourly timer activation. Retries back off
+# from one minute to thirty so a persistent failure does not hammer M-Team.
 StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecSearchPath=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=swarmfolio run --apply
-TimeoutStartSec=30m
+# Each qBittorrent wait may last qbittorrent.poll_timeout (default ten minutes).
+TimeoutStartSec=90m
 Restart=on-failure
 RestartSec=60s
+RestartSteps=5
+RestartMaxDelaySec=30m
 
 # The optimizer only needs its configuration and HTTP access to M-Team and qBittorrent.
 LockPersonality=true

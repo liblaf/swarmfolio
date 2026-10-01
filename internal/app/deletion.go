@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"time"
 
 	"github.com/liblaf/swarmfolio/internal/optimizer"
 )
@@ -14,98 +12,67 @@ import (
 // from its registry. It deliberately does not wait for disk space: callers
 // that retain files must not treat a registration delete as a space reclaim.
 func (r Runner) waitForRegistrationsRemoved(ctx context.Context, hashes []string) error {
-	pollCtx, cancel := context.WithTimeout(ctx, r.PollTimeout)
-	defer cancel()
-	ticker := time.NewTicker(r.PollInterval)
-	defer ticker.Stop()
-	for {
-		torrents, err := r.QBittorrent.Torrents(pollCtx)
+	return r.poll(ctx, "wait for qBittorrent to remove registrations", func(ctx context.Context) (error, error) {
+		torrents, err := r.QBittorrent.Torrents(ctx)
 		if err != nil {
-			if pollCtx.Err() != nil {
-				return fmt.Errorf("wait for qBittorrent to remove registrations within %s: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
-			}
-			if !retryableReadTimeout(err) {
-				return fmt.Errorf("list qBittorrent torrents while waiting for registration removal: %w", err)
-			}
-			select {
-			case <-pollCtx.Done():
-				return fmt.Errorf("wait for qBittorrent to remove registrations within %s after transient read timeouts: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
-			case <-ticker.C:
-				continue
-			}
+			return nil, fmt.Errorf("list qBittorrent torrents while waiting for registration removal: %w", err)
 		}
-		pending := ""
 		for _, hash := range hashes {
 			if findHash(torrents, hash) != nil {
-				pending = hash
-				break
+				return fmt.Errorf("registration %q is still present", hash), nil
 			}
 		}
-		if pending == "" {
-			return nil
-		}
-		select {
-		case <-pollCtx.Done():
-			return fmt.Errorf("wait for qBittorrent to remove registration %q within %s: %w", pending, r.PollTimeout, pollCtx.Err())
-		case <-ticker.C:
-		}
-	}
+		return nil, nil
+	})
 }
 
 // waitForRemovals waits for both the torrent list and physical-space accounting
 // to catch up with an accepted delete. Invalid responses still fail immediately.
 func (r Runner) waitForRemovals(ctx context.Context, removals []optimizer.Removal) (snapshot, error) {
-	pollCtx, cancel := context.WithTimeout(ctx, r.PollTimeout)
-	defer cancel()
-	ticker := time.NewTicker(r.PollInterval)
-	defer ticker.Stop()
-	for {
-		state, err := r.snapshot(pollCtx)
-		if err != nil {
-			if pollCtx.Err() != nil {
-				return snapshot{}, fmt.Errorf("wait for deletion and disk space within %s: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
-			}
-			if !retryableReadTimeout(err) {
-				return snapshot{}, fmt.Errorf("read qBittorrent state while waiting for deletion: %w", err)
-			}
-			select {
-			case <-pollCtx.Done():
-				return snapshot{}, fmt.Errorf("wait for deletion and disk space within %s after transient read timeouts: %w", r.PollTimeout, errors.Join(pollCtx.Err(), err))
-			case <-ticker.C:
-				continue
-			}
-		}
-		var pending error
+	return r.waitForSnapshot(ctx, "wait for deletion and disk space", func(state snapshot) error {
 		for _, removal := range removals {
 			if findHash(state.all, removal.Hash) != nil {
-				pending = fmt.Errorf("deleted torrent %s is still present", removal.Hash)
-				break
+				return fmt.Errorf("deleted torrent %s is still present", removal.Hash)
 			}
 		}
-		if pending == nil {
-			pending = validatePlannedUsed(state, 0, nil)
+		if err := validatePlannedUsed(state, 0, nil); err != nil {
+			return err
 		}
-		if pending == nil && state.budget.FreeBytes-state.budget.OutstandingBytes < state.budget.RequiredFreeBytes {
-			pending = errors.New("reclaimed disk space does not yet preserve the free-space reserve")
+		if !preservesReserve(state) {
+			return errors.New("reclaimed disk space does not yet preserve the free-space reserve")
 		}
-		if pending == nil {
-			return state, nil
-		}
-		select {
-		case <-pollCtx.Done():
-			return snapshot{}, fmt.Errorf("wait for deletion and disk space within %s: %w", r.PollTimeout, errors.Join(pollCtx.Err(), pending))
-		case <-ticker.C:
-		}
-	}
+		return nil
+	})
 }
 
-// Classify the read error independently of the polling deadline. Callers handle
-// context expiry before classification and while waiting to retry; rechecking
-// it here could misclassify a timeout if the deadline expires between checks.
-func retryableReadTimeout(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
+// waitForPendingBudget gives space reclaimed by an earlier, interrupted run
+// time to appear before a valid pending addition is judged over budget.
+// Removing it early would make the planner delete further replacements for
+// the same offer.
+func (r Runner) waitForPendingBudget(ctx context.Context) (snapshot, error) {
+	return r.waitForSnapshot(ctx, "wait for pending torrents to fit the budget", func(state snapshot) error {
+		return validatePlannedUsed(state, 0, nil)
+	})
+}
+
+// waitForSnapshot polls qBittorrent snapshots until pending reports that the
+// latest one has converged, and returns that snapshot.
+func (r Runner) waitForSnapshot(ctx context.Context, what string, pending func(snapshot) error) (snapshot, error) {
+	var state snapshot
+	err := r.poll(ctx, what, func(ctx context.Context) (error, error) {
+		var err error
+		state, err = r.snapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return pending(state), nil
+	})
+	if err != nil {
+		return snapshot{}, err
 	}
-	var networkError net.Error
-	return errors.As(err, &networkError) && networkError.Timeout()
+	return state, nil
+}
+
+func preservesReserve(state snapshot) bool {
+	return state.budget.FreeBytes-state.budget.OutstandingBytes >= state.budget.RequiredFreeBytes
 }

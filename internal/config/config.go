@@ -57,6 +57,7 @@ type fileQBittorrent struct {
 	APIKey      *string `toml:"api_key"`
 	APIKeyKebab *string `toml:"api-key"`
 	Category    *string `toml:"category"`
+	PollTimeout *string `toml:"poll_timeout"`
 }
 
 type filePolicy struct {
@@ -70,6 +71,7 @@ type filePolicy struct {
 	ActiveUploadRate          *string  `toml:"active_upload_rate"`
 	MaxAdditions              *int     `toml:"max_additions"`
 	MaxRemovals               *int     `toml:"max_removals"`
+	MaxIncompleteDownloads    *int     `toml:"max_incomplete_downloads"`
 	ReplacementMargin         *float64 `toml:"replacement_margin"`
 }
 
@@ -102,9 +104,10 @@ type MTeam struct {
 }
 
 type QBittorrent struct {
-	BaseURL  string
-	APIKey   string
-	Category string
+	BaseURL     string
+	APIKey      string
+	Category    string
+	PollTimeout time.Duration
 }
 
 type Policy struct {
@@ -118,7 +121,9 @@ type Policy struct {
 	ActiveUploadRate          int64
 	MaxAdditions              int
 	MaxRemovals               int
-	ReplacementMargin         float64
+	// MaxIncompleteDownloads caps unfinished managed torrents; zero means no cap.
+	MaxIncompleteDownloads int
+	ReplacementMargin      float64
 }
 
 func DefaultPath() (string, error) {
@@ -229,6 +234,13 @@ func Parse(data []byte) (Settings, error) {
 	if err != nil {
 		return Settings{}, err
 	}
+	pollTimeout, err := positiveDuration("qbittorrent.poll_timeout", defaultString(raw.QBittorrent.PollTimeout, "10m"))
+	if err != nil {
+		return Settings{}, err
+	}
+	if raw.Policy.MaxIncompleteDownloads != nil && *raw.Policy.MaxIncompleteDownloads < 1 {
+		return Settings{}, errors.New("policy.max_incomplete_downloads must be positive when set")
+	}
 	zone := defaultString(raw.MTeam.Timezone, "Asia/Shanghai")
 	if zone == "" {
 		return Settings{}, errors.New("mteam.timezone is required when set")
@@ -253,9 +265,10 @@ func Parse(data []byte) (Settings, error) {
 			Location: location,
 		},
 		QBittorrent: QBittorrent{
-			BaseURL:  strings.TrimRight(defaultString(raw.QBittorrent.BaseURL, "http://localhost:8080"), "/"),
-			APIKey:   qbittorrentAPIKey,
-			Category: category,
+			BaseURL:     strings.TrimRight(defaultString(raw.QBittorrent.BaseURL, "http://localhost:8080"), "/"),
+			APIKey:      qbittorrentAPIKey,
+			Category:    category,
+			PollTimeout: pollTimeout,
 		},
 		Policy: Policy{
 			CandidateMaxAge: candidateMaxAge, PlanningHorizon: planningHorizon, MinimumFreeleechRemaining: freeRemaining,
@@ -263,7 +276,8 @@ func Parse(data []byte) (Settings, error) {
 			MinimumOpportunityRatio: defaultFloat64(raw.Policy.MinimumOpportunityRatio, 0.1),
 			MinimumResidency:        residency, MinimumIdle: idle, ActiveUploadRate: uploadRate,
 			MaxAdditions: defaultInt(raw.Policy.MaxAdditions, 2), MaxRemovals: defaultInt(raw.Policy.MaxRemovals, 4),
-			ReplacementMargin: defaultFloat64(raw.Policy.ReplacementMargin, 1.25),
+			MaxIncompleteDownloads: defaultInt(raw.Policy.MaxIncompleteDownloads, 0),
+			ReplacementMargin:      defaultFloat64(raw.Policy.ReplacementMargin, 1.25),
 		},
 		HTTPTimeout: timeout,
 	}

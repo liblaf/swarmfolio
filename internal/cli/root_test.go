@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -464,6 +465,11 @@ func TestSystemdServiceRetriesFailedRunsWithoutRateLimitLockout(t *testing.T) {
 	delay, err := time.ParseDuration(directives["RestartSec"])
 	if err != nil || delay < time.Minute {
 		t.Fatalf("RestartSec = %q; retry delay must be at least one minute: %v", directives["RestartSec"], err)
+	}
+	steps, err := strconv.Atoi(directives["RestartSteps"])
+	maxDelay, maxErr := time.ParseDuration(directives["RestartMaxDelaySec"])
+	if err != nil || steps < 1 || maxErr != nil || maxDelay <= delay {
+		t.Fatalf("RestartSteps = %q, RestartMaxDelaySec = %q; persistent failures must back off", directives["RestartSteps"], directives["RestartMaxDelaySec"])
 	}
 	if directives["StartLimitIntervalSec"] != "0" {
 		t.Fatalf("StartLimitIntervalSec = %q; systemd can permanently stop retries after a start burst", directives["StartLimitIntervalSec"])

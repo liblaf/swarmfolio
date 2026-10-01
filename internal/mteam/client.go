@@ -23,6 +23,17 @@ const defaultBaseURL = "https://api.m-team.cc"
 // metainfo download allowance. Other torrents may still be downloaded.
 var ErrTorrentDownloadLimit = errors.New("daily torrent download limit reached")
 
+// DownloadRefusedError means M-Team's metainfo download endpoint answered with
+// an API error code instead of metainfo. The upstream message is deliberately
+// omitted because it may contain private URLs.
+type DownloadRefusedError struct {
+	Code int64
+}
+
+func (e *DownloadRefusedError) Error() string {
+	return fmt.Sprintf("download API error %d", e.Code)
+}
+
 // Config controls requests to the M-Team API. Timezone is an IANA location
 // name used for M-Team's zone-less discountEndTime values (for example,
 // "Asia/Shanghai").
@@ -239,7 +250,7 @@ func downloadAPIError(payload []byte) error {
 	if code == 1 && response.Message == "相同種子當天最多下載10次" {
 		return ErrTorrentDownloadLimit
 	}
-	return fmt.Errorf("download API error %d", code)
+	return &DownloadRefusedError{Code: code}
 }
 
 func (c *Client) credentialedHTTPClient() *http.Client {

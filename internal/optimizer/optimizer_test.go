@@ -123,6 +123,20 @@ func TestBuildMaximizesCombinedCreditInsteadOfFirstRankedCandidate(t *testing.T)
 	}
 }
 
+func TestBuildSpendsLeastValuableRemovalFirst(t *testing.T) {
+	cfg := testConfig()
+	cs := []Candidate{candidate("medium-a", 45, 1, 8), candidate("medium-b", 45, 1, 8)}
+	// Hash order would attach the more valuable old-a to the first addition.
+	plan, err := Build(testNow, cs, []Torrent{torrent("old-a", 45, 5), torrent("old-b", 45, 1)}, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Additions) != 2 || len(plan.Additions[0].Removals) != 1 || plan.Additions[0].Removals[0].Hash != "old-b" ||
+		len(plan.Additions[1].Removals) != 1 || plan.Additions[1].Removals[0].Hash != "old-a" {
+		t.Fatalf("removal order = %#v", plan)
+	}
+}
+
 func TestBuildFindsRemovalThatFitsActionCap(t *testing.T) {
 	cfg := testConfig()
 	plan, err := Build(testNow, []Candidate{candidate("new", 60, 1, 8)}, []Torrent{
