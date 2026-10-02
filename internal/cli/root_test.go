@@ -215,6 +215,40 @@ minimum_residency = "1h"
 	}
 }
 
+func TestPlanReportsInitialQBittorrentConnectionFailureWithoutEmptyPlan(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	serverURL := server.URL
+	server.Close()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	config := `[mteam]
+api-key = "mteam-secret"
+
+[qbittorrent]
+base_url = "` + serverURL + `"
+`
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"--config", path, "plan"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "list qBittorrent torrents") {
+		t.Fatalf("plan error = %v; output=%s", err, stdout.String())
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "Outcome error: list qBittorrent torrents") {
+		t.Fatalf("output = %q", output)
+	}
+	for _, unwanted := range []string{"Mode:", "Download disk:", "Portfolio:", "No changes selected."} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("output must not contain %q: %s", unwanted, output)
+		}
+	}
+}
+
 func TestWriteOutcomePreservesOperationAndWriterErrors(t *testing.T) {
 	t.Parallel()
 	operationErr := errors.New("operation failed")
@@ -245,7 +279,8 @@ func TestWriteReportDistinguishesPlannedActionsFromMutations(t *testing.T) {
 	keepFiles := false
 	var output bytes.Buffer
 	err := writeReport(&output, app.Report{
-		Actions: []app.Action{{CandidateID: "2", Name: "candidate"}},
+		DownloadPath: "/downloads/swarmfolio",
+		Actions:      []app.Action{{CandidateID: "2", Name: "candidate"}},
 		Mutations: []app.Mutation{
 			{Operation: "delete", Hashes: []string{"old"}, Status: "accepted", DeleteFiles: &deleteFiles},
 			{Operation: "delete", Hashes: []string{"pending"}, Status: "accepted", DeleteFiles: &keepFiles},
@@ -259,6 +294,50 @@ func TestWriteReportDistinguishesPlannedActionsFromMutations(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("report %q does not contain %q", output.String(), want)
 		}
+	}
+}
+
+func TestWriteReportPreservesSnapshotOnPlanningFailure(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	err := writeReport(&output, app.Report{
+		Mode:         "apply",
+		DownloadPath: "/downloads/swarmfolio",
+		Budget: budget.Result{
+			FreeBytes:         2 << 40,
+			UsedBytes:         512 << 30,
+			RequiredFreeBytes: 1 << 40,
+			LimitBytes:        1 << 40,
+		},
+		ProjectedUsedBytes: 512 << 30,
+		Error:              "search M-Team freeleech torrents: unavailable",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Download disk: 2.0 TiB free; reserve 1.0 TiB",
+		"Portfolio: 512.0 GiB now; 1.0 TiB limit; 512.0 GiB projected",
+		"Outcome error: search M-Team freeleech torrents: unavailable",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("report %q does not contain %q", output.String(), want)
+		}
+	}
+	if strings.Contains(output.String(), "No changes selected.") {
+		t.Fatalf("report incorrectly claimed no changes: %q", output.String())
+	}
+}
+
+func TestWriteReportShowsNoChangesAfterSuccessfulSnapshot(t *testing.T) {
+	t.Parallel()
+	var output bytes.Buffer
+	err := writeReport(&output, app.Report{Mode: "plan", DownloadPath: "/downloads/swarmfolio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "No changes selected.") {
+		t.Fatalf("report = %q", output.String())
 	}
 }
 

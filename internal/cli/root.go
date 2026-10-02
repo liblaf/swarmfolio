@@ -293,6 +293,13 @@ func writeFile(path string, data []byte, mode os.FileMode, force bool) error {
 }
 
 func writeReport(writer io.Writer, report app.Report) error {
+	// Runner assigns DownloadPath only after its first complete qBittorrent
+	// snapshot. Until then, the zero-valued report has no budget or plan to
+	// describe, so show only the failure that prevented it.
+	if report.Error != "" && report.DownloadPath == "" {
+		_, err := fmt.Fprintf(writer, "Outcome error: %s\n", report.Error)
+		return err
+	}
 	if _, err := fmt.Fprintf(writer, "Mode: %s\n", report.Mode); err != nil {
 		return err
 	}
@@ -348,7 +355,7 @@ func writeReport(writer io.Writer, report app.Report) error {
 			}
 		}
 	}
-	if len(report.Actions) == 0 && len(report.Recoveries) == 0 && len(report.Mutations) == 0 {
+	if report.Error == "" && len(report.Actions) == 0 && len(report.Recoveries) == 0 && len(report.Mutations) == 0 {
 		if _, err := fmt.Fprintln(writer, "No changes selected."); err != nil {
 			return err
 		}
