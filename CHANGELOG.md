@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.4](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.4) - 2026-10-02
+
+### 🐛 Bug Fixes
+
+- **(cli)** report unavailable qBittorrent without an empty plan - [b5ae274](https://github.com/liblaf/swarmfolio/commit/b5ae2742f043c5807cb012829b6773c6133a18c7) by [@liblaf](https://github.com/liblaf)
+- **(mteam)** retry transient freeleech search failures - [de2298f](https://github.com/liblaf/swarmfolio/commit/de2298ffc89e6c59712e987e6f98e650a647d06d) by [@liblaf](https://github.com/liblaf)
+- avoid extra replacement deletions while qBittorrent is stalled (#24) - [c6cfadc](https://github.com/liblaf/swarmfolio/commit/c6cfadc0db0fdc5d0d7d82dd6953c6455072e750) by [@liblaf](https://github.com/liblaf)
+
+### ❤️ Contributors
+
+- [@liblaf](https://github.com/liblaf)
+
 ## [v0.4.3](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.3) - 2026-09-28
 
 ### 🐛 Bug Fixes
@@ -15,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 
 ## [v0.4.2](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.2) - 2026-09-28
