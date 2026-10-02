@@ -123,7 +123,8 @@ func NewClient(config Config) (*Client, error) {
 }
 
 // Search returns current download-free results from the configured number of
-// pages. It rejects malformed envelopes and filters expired promotions.
+// pages. It retries transient search failures, rejects malformed envelopes,
+// and filters expired promotions.
 func (c *Client) Search(ctx context.Context) ([]Torrent, error) {
 	var torrents []Torrent
 	seen := make(map[int64]Torrent)
@@ -140,16 +141,7 @@ func (c *Client) Search(ctx context.Context) ([]Torrent, error) {
 			if err != nil {
 				return nil, fmt.Errorf("mteam: marshal search request: %w", err)
 			}
-			request, err := c.request(ctx, http.MethodPost, "/api/torrent/search", bytes.NewReader(body))
-			if err != nil {
-				return nil, err
-			}
-			request.Header.Set("Content-Type", "application/json")
-			response, err := c.credentialedHTTPClient().Do(request)
-			if err != nil {
-				return nil, fmt.Errorf("mteam: search page %d discount %s: %w", page, discount, err)
-			}
-			payload, err := readResponse(response)
+			payload, err := c.searchPage(ctx, body)
 			if err != nil {
 				return nil, fmt.Errorf("mteam: search page %d discount %s: %w", page, discount, err)
 			}
