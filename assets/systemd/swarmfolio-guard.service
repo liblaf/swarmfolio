@@ -1,0 +1,28 @@
+[Unit]
+Description=Guard M-Team freeleech downloads in qBittorrent
+Documentation=https://github.com/liblaf/swarmfolio
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecSearchPath=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=swarmfolio guard
+ExecStopPost=swarmfolio guard --halt
+Restart=always
+RestartSec=15s
+
+# The guard only needs its configuration and HTTP access to M-Team and qBittorrent.
+LockPersonality=true
+MemoryDenyWriteExecute=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target

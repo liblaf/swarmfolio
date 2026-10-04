@@ -105,7 +105,7 @@ func TestWaitForTorrentReturnsUnexpectedStableState(t *testing.T) {
 }
 
 func TestExecuteWaitsForInitialCheckingBeforeReplacingIncumbent(t *testing.T) {
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	polling := &addCheckingQBT{fakeQBT: qbt}
 	runner := testRunner(qbt, mt)
 	runner.QBittorrent = polling

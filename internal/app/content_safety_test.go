@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liblaf/swarmfolio/internal/qbittorrent"
 )
@@ -14,7 +15,7 @@ func TestExecuteRollsBackCollidingAdditionWithoutDeletingFiles(t *testing.T) {
 	for _, collision := range []string{"same file", "parent directory", "child file", "missing path", "other category"} {
 		t.Run(collision, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			if collision == "other category" {
 				qbt.torrents[0].Category = "user-managed"
 				qbt.torrents[0].Size = 30
@@ -44,7 +45,7 @@ func TestExecuteRollsBackCollidingAdditionWithoutDeletingFiles(t *testing.T) {
 
 func TestExecuteRejectsSharedCompletedRemovalBeforeAdding(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 		Hash: "user", AddedOn: appNow, Category: "user-managed", Size: 1, AmountLeft: 1,
 		SavePath: "/downloads/user", ContentPath: qbt.torrents[0].ContentPath,
@@ -58,7 +59,7 @@ func TestExecuteRejectsSharedCompletedRemovalBeforeAdding(t *testing.T) {
 
 func TestExecuteRefusesCollidingPendingResume(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT(qbt.addHash)
 	qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 		Hash: "user", AddedOn: appNow, Category: "user-managed", Size: 30, Progress: 1,
@@ -76,7 +77,7 @@ func TestExecuteRetainsFilesWhenRemovingSharedPendingTorrent(t *testing.T) {
 	for _, reason := range []string{"stale", "over budget"} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt = pendingQBT(qbt.addHash)
 			qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 				Hash: "user", AddedOn: appNow, Category: "user-managed", Size: 30, Progress: 1,
@@ -103,15 +104,16 @@ func TestExecuteRechecksContentAfterPromotionRefresh(t *testing.T) {
 	for _, stage := range []string{"before deletion", "before start"} {
 		t.Run(stage, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
+			mt.results[0].DiscountEndTime = time.Time{}
 			runner := testRunner(qbt, mt)
 			searches := 0
 			runner.MTeam = &changingSearchMTeam{fakeMTeam: mt, change: func() {
 				searches++
-				if stage == "before deletion" && searches == 2 {
+				if stage == "before deletion" && searches == 3 {
 					qbt.torrents[1].ContentPath = qbt.torrents[0].ContentPath
 				}
-				if stage == "before start" && searches == 3 {
+				if stage == "before start" && searches == 4 {
 					qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 						Hash: "user", AddedOn: appNow, Category: "user-managed", ContentPath: qbt.torrents[0].ContentPath,
 					})

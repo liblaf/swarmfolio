@@ -108,6 +108,7 @@ func TestExecuteReplansAfterExcludingExistingHash(t *testing.T) {
 func TestExecuteReplansAroundDailyDownloadLimit(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	_, otherHash := alternativeCandidate(t, mt)
 	qbt.addHash, qbt.addSize = otherHash, 20
 	limited := &candidateDownloadErrorMTeam{fakeMTeam: mt, errorsByID: map[int64]error{2: mteam.ErrTorrentDownloadLimit}}
@@ -164,6 +165,7 @@ func TestExecuteDoesNotSuppressUnknownCandidateDownloadError(t *testing.T) {
 func TestExecuteRecoversPendingHashWithDifferentTitle(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt = pendingQBT(qbt.addHash)
 	qbt.torrents[0].Name = "localized torrent title"
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
@@ -181,6 +183,7 @@ func TestExecuteRecoversPendingHashWithDifferentTitle(t *testing.T) {
 func TestExecuteAddsOnlyOneOfferPerHash(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents = nil
 	alias := mt.results[0]
 	alias.ID, alias.Name = 3, "alias title"

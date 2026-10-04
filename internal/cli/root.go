@@ -47,12 +47,43 @@ func New(stdout, stderr io.Writer) *cobra.Command {
 	command.AddCommand(
 		options.runCommand(),
 		options.planCommand(),
+		options.guardCommand(),
 		options.configCommand(),
 		options.completionCommand(command),
 	)
 	if runtime.GOOS == "linux" {
 		command.AddCommand(options.systemdCommand())
 	}
+	return command
+}
+
+func (o *options) guardCommand() *cobra.Command {
+	var once, halt bool
+	command := &cobra.Command{
+		Use:   "guard",
+		Short: "Continuously stop managed downloads when freeleech is no longer valid",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			settings, err := config.Load(o.configPath)
+			if err != nil {
+				return err
+			}
+			runner, err := newRunner(settings)
+			if err != nil {
+				return err
+			}
+			if halt {
+				return runner.Halt(command.Context())
+			}
+			if once {
+				return runner.Guard(command.Context())
+			}
+			return runner.Watch(command.Context())
+		},
+	}
+	command.Flags().BoolVar(&once, "once", false, "run one freeleech guard pass")
+	command.Flags().BoolVar(&halt, "halt", false, "stop all active managed downloads")
+	command.MarkFlagsMutuallyExclusive("once", "halt")
 	return command
 }
 
@@ -95,13 +126,22 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 	if err != nil {
 		return err
 	}
+	runner, err := newRunner(settings)
+	if err != nil {
+		return err
+	}
+	report, err := runner.Execute(ctx, apply)
+	return writeOutcome(o.stdout, report, jsonOutput, err)
+}
+
+func newRunner(settings config.Settings) (app.Runner, error) {
 	httpClient := &http.Client{Timeout: settings.HTTPTimeout}
 	qbt, err := qbittorrent.New(qbittorrent.Config{
 		BaseURL: settings.QBittorrent.BaseURL, APIKey: settings.QBittorrent.APIKey,
 		HTTPClient: httpClient,
 	})
 	if err != nil {
-		return err
+		return app.Runner{}, err
 	}
 	mt, err := mteam.NewClient(mteam.Config{
 		BaseURL: settings.MTeam.BaseURL, APIKey: settings.MTeam.APIKey,
@@ -109,10 +149,9 @@ func (o *options) execute(ctx context.Context, apply, jsonOutput bool) error {
 		Timezone: settings.MTeam.Location.String(), HTTPClient: httpClient,
 	})
 	if err != nil {
-		return err
+		return app.Runner{}, err
 	}
-	report, err := (app.Runner{Config: settings, QBittorrent: qbt, MTeam: mt, PollTimeout: settings.QBittorrent.PollTimeout}).Execute(ctx, apply)
-	return writeOutcome(o.stdout, report, jsonOutput, err)
+	return app.Runner{Config: settings, QBittorrent: qbt, MTeam: mt, PollTimeout: settings.QBittorrent.PollTimeout}, nil
 }
 
 func writeOutcome(writer io.Writer, report app.Report, jsonOutput bool, outcomeErr error) error {
@@ -188,15 +227,19 @@ func (o *options) completionCommand(root *cobra.Command) *cobra.Command {
 func (o *options) systemdCommand() *cobra.Command {
 	command := &cobra.Command{Use: "systemd", Short: "Print or install the user systemd units"}
 	command.AddCommand(&cobra.Command{
-		Use:       "print (service|timer)",
+		Use:       "print (service|timer|guard)",
 		Short:     "Print an embedded user unit",
 		Args:      cobra.ExactArgs(1),
-		ValidArgs: []string{"service", "timer"},
+		ValidArgs: []string{"service", "timer", "guard"},
 		RunE: func(_ *cobra.Command, args []string) error {
-			if args[0] != "service" && args[0] != "timer" {
-				return fmt.Errorf("unit must be service or timer, got %q", args[0])
+			if args[0] != "service" && args[0] != "timer" && args[0] != "guard" {
+				return fmt.Errorf("unit must be service, timer, or guard, got %q", args[0])
 			}
-			data, err := assets.Files.ReadFile("systemd/swarmfolio." + args[0])
+			name := "swarmfolio." + args[0]
+			if args[0] == "guard" {
+				name = "swarmfolio-guard.service"
+			}
+			data, err := assets.Files.ReadFile("systemd/" + name)
 			if err != nil {
 				return err
 			}
@@ -207,7 +250,7 @@ func (o *options) systemdCommand() *cobra.Command {
 	var force bool
 	install := &cobra.Command{
 		Use:   "install",
-		Short: "Install user units and enable and start the hourly timer",
+		Short: "Install user units and start the freeleech guard and hourly timer",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			dir, err := os.UserConfigDir()
@@ -215,7 +258,7 @@ func (o *options) systemdCommand() *cobra.Command {
 				return fmt.Errorf("resolve XDG config directory: %w", err)
 			}
 			dir = filepath.Join(dir, "systemd", "user")
-			for _, name := range []string{"swarmfolio.service", "swarmfolio.timer"} {
+			for _, name := range systemdUnitNames {
 				data, err := assets.Files.ReadFile("systemd/" + name)
 				if err != nil {
 					return err
@@ -227,6 +270,9 @@ func (o *options) systemdCommand() *cobra.Command {
 			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "daemon-reload"); err != nil {
 				return err
 			}
+			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "enable", "--now", "swarmfolio-guard.service"); err != nil {
+				return err
+			}
 			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "enable", "--now", "swarmfolio.timer"); err != nil {
 				return err
 			}
@@ -236,7 +282,41 @@ func (o *options) systemdCommand() *cobra.Command {
 	}
 	install.Flags().BoolVar(&force, "force", false, "replace existing unit files")
 	command.AddCommand(install)
+	command.AddCommand(&cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove the installed user units",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			dir, err := systemdUserUnitDir()
+			if err != nil {
+				return err
+			}
+			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "disable", "--now", "swarmfolio.timer", "swarmfolio-guard.service"); err != nil {
+				return err
+			}
+			for _, name := range systemdUnitNames {
+				if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("remove %q: %w", name, err)
+				}
+			}
+			if err := runSystemctl(command.Context(), o.stdout, o.stderr, "daemon-reload"); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(o.stdout, "Removed user units from %s\n", dir)
+			return err
+		},
+	})
 	return command
+}
+
+var systemdUnitNames = []string{"swarmfolio.service", "swarmfolio.timer", "swarmfolio-guard.service"}
+
+func systemdUserUnitDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve XDG config directory: %w", err)
+	}
+	return filepath.Join(dir, "systemd", "user"), nil
 }
 
 func writeUnitFile(path string, data []byte, force bool) error {

@@ -2,7 +2,8 @@
 Description=Optimize the M-Team freeleech torrent portfolio
 Documentation=https://github.com/liblaf/swarmfolio
 Wants=network-online.target
-After=network-online.target
+Requires=swarmfolio-guard.service
+After=network-online.target swarmfolio-guard.service
 # Retry indefinitely: a transient qBittorrent or M-Team failure must not leave
 # the optimizer stopped until the next hourly timer activation. Retries back off
 # from one minute to thirty so a persistent failure does not hammer M-Team.

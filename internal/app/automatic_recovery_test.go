@@ -11,7 +11,7 @@ import (
 
 func TestAutomaticRetryResumesAfterSpaceEstimateRecovers(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	runner := apiTestRunner(t, qbt, mt)
 	qbt.freeSpace = func() (int64, error) { return 30, nil }
 	first, err := runner.Execute(context.Background(), true)
@@ -40,7 +40,7 @@ func TestAutomaticRetryReconcilesLostMutationResponses(t *testing.T) {
 	for _, operation := range []string{"add", "delete", "start"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			runner := apiTestRunner(t, qbt, mt)
 			runner.QBittorrent = &lostMutationResponseQBT{fakeQBT: qbt, operation: operation}
 			first, err := runner.Execute(context.Background(), true)
@@ -76,7 +76,7 @@ func TestAutomaticRetryReconcilesLostMutationResponses(t *testing.T) {
 
 func TestAutomaticRetryDoesNotResumeExpiredPendingOffer(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT(qbt.addHash)
 	qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 		Hash: "user", AddedOn: appNow, Size: 10, Progress: 1,

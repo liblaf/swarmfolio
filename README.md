@@ -13,7 +13,7 @@
 
 </div>
 
-Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. Each run chooses a portfolio of download-free torrents to maximize a heuristic score for **M-Team credited upload**, including 2× promotions, within its disk budget and action limits.
+Swarmfolio optimizes an M-Team freeleech portfolio for qBittorrent and includes a continuous guard for active managed downloads. Each optimization run chooses download-free torrents to maximize a heuristic score for **M-Team credited upload**, including 2× promotions, within its disk budget and action limits.
 
 ## ✨ Safety Model
 
@@ -21,15 +21,15 @@ Swarmfolio is a stateless, one-shot M-Team freeleech optimizer for qBittorrent. 
 - Both plans and applied runs use qBittorrent's reported free space by default. Swarmfolio subtracts outstanding download commitments and rechecks the reported budget before starting downloads.
 - The qBittorrent category is the sole ownership marker. Every torrent in the configured category is Swarmfolio-managed; move a torrent out of it to protect that torrent.
 - Only complete, old, idle, low-activity managed torrents are eligible for replacement.
-- Only `FREE` and `_2X_FREE` offers are allowed. An explicit `null` or empty `discountEndTime` means no scheduled end; timed offers must have sufficient freeleech time remaining. Swarmfolio refreshes M-Team offers before deleting replacements and immediately before starting or resuming a download. Missing offers, non-free discounts, malformed expiry data, or insufficient freeleech time stop the action.
-- These checks govern download admission. As a one-shot tool, Swarmfolio does not continuously monitor running downloads or stop them when a promotion expires.
-- New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On each applied run, stopped incomplete downloads in the category, including partial downloads, are verified against current M-Team metainfo before they are resumed or their registrations are removed.
+- Only `FREE` and `_2X_FREE` offers are allowed. An explicit `null` or empty `discountEndTime` means no scheduled end. For a timed offer, Swarmfolio requires measured qBittorrent download capacity to finish every active unfinished download plus all planned additions before expiry, with the default two-hour margin and a 2× capacity safety factor. Rate evidence comes from current transfers and completions within the last fifteen minutes. Missing capacity evidence, a missing offer, non-free discount, malformed expiry data, or insufficient time rejects admission. This prediction is conservative but cannot guarantee completion.
+- The installed guard checks active incomplete managed downloads every minute, including torrents with automatic management disabled. A torrent whose current promotion is absent, non-free, malformed, or too close to expiry is paused while its files and registration are retained. A timed download is also paused if its own measured rate cannot finish its remaining bytes with the safety factor and margin. Unexpected promotion revocations are detected on the next guard pass.
+- New torrents are added stopped before any old data is removed. Swarmfolio waits for qBittorrent's initial checking state to settle before verifying the addition. On each applied run, stopped incomplete downloads in the category, including partial downloads, are verified against current M-Team metainfo before they are resumed or their registrations are removed. Downloads marked as paused by the guard keep their registrations while the promotion or completion budget is unsafe; they may resume after both checks pass.
 - Before starting a torrent or deleting completed content, Swarmfolio rejects overlapping content paths across all categories. Missing content paths stop the action because isolation cannot be verified.
 - Removing a pending torrent or rolling back an addition always retains its files (`deleteFiles=false`): zero verified progress does not prove that the files are absent or unshared. Retained files continue to consume disk space and may require manual cleanup.
 - Before deleting replacements, Swarmfolio rechecks that the new torrent is still stopped and correctly managed. Matching retained partial or complete data can be reused after its identity, size, and content isolation are verified. After deletion, it waits up to ten minutes (`qbittorrent.poll_timeout`) for the removed torrents to disappear and the reported disk space to preserve the reserve, retrying temporary read timeouts within that window. A timeout leaves the new torrent stopped; the installed service retries automatically, rechecks qBittorrent and current freeleech offers, and resumes or replans the pending addition. A retry that finds the pending addition over budget first waits the same window for space reclaimed by the interrupted run to appear, so it does not delete further replacements for the same offer.
 - Preallocated additions must fit alongside all existing unfinished download commitments before any replacement data is deleted.
 - Torrent identity and payload size are checked against the downloaded metainfo before adding it, so differences between M-Team titles and qBittorrent names do not cause duplicate additions or failed recovery. Torrents already present in any category are excluded from new additions.
-- Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently.
+- Applied runs use an operating-system file lock, so two Swarmfolio processes under the same local account cannot delete from the same portfolio concurrently. The guard runs independently and can stop downloads while an optimizer is waiting for qBittorrent.
 - Candidate API responses, disk accounting, torrent metadata, and state changes are validated; unexpected state stops the run visibly.
 
 ## 📦 Installation
@@ -135,20 +135,21 @@ swarmfolio completion fish >"${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/
 
 ## ⏱️ Unattended Operation (Linux)
 
-The executable embeds [`swarmfolio.service`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.service) and [`swarmfolio.timer`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio.timer). Install the user units and start the hourly timer with:
+The executable embeds the optimizer service and timer plus [`swarmfolio-guard.service`](https://github.com/liblaf/swarmfolio/blob/main/assets/systemd/swarmfolio-guard.service). Install the user units to start the freeleech guard and the hourly optimizer timer:
 
 ```bash
 swarmfolio systemd install
+systemctl --user status swarmfolio-guard.service
 systemctl --user list-timers swarmfolio.timer
 ```
 
-`systemd install` writes the embedded units, reloads the user systemd manager, and enables and starts `swarmfolio.timer`. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried.
+`systemd install` writes the embedded units, reloads the user systemd manager, starts `swarmfolio-guard.service`, then enables and starts `swarmfolio.timer`. The guard runs `swarmfolio guard`, polling once a minute and restarting after an error. The optimizer requires the guard service, so a manual optimizer start also starts the guard. Stopping, failing, or restarting the guard stops active incomplete managed downloads and retains their files and registrations. It can be called repeatedly from a dotfiles lifecycle hook: identical units are accepted, while changed unit files require `--force` to replace. A failed systemctl command stops installation with an error and can be retried. Use `swarmfolio guard --once` for a single guard pass, `swarmfolio guard --halt` to stop active managed downloads, or `swarmfolio systemd uninstall` to stop and remove the installed units.
 
 The timer performs routine optimization hourly. If a run fails, the service retries automatically after one minute, backing off to at most thirty minutes between consecutive failures, and continues retrying without a start-limit lockout. The backoff requires systemd 254 or newer; older versions ignore it and retry every minute. Each retry rebuilds its decisions from current qBittorrent state and M-Team offers; it can resume a valid pending addition, remove a stale registration while retaining its files, or replan an interrupted replacement. An API response lost after a successful operation is reconciled from the next snapshot. No manual torrent start or recovery command is needed for these interrupted runs. Errors remain visible in `journalctl --user -u swarmfolio.service`.
 
 Within a run, M-Team search requests retry timeouts and HTTP 502, 503, or 504 responses up to three attempts, waiting one second and then two seconds. Each attempt uses `http.timeout` (default thirty seconds), and cancellation stops the wait. Only the failed page and promotion query is repeated. Authentication errors, other HTTP errors, malformed responses, and API errors still fail immediately. Token generation and metainfo downloads are not retried within the request. An exhausted search retry fails the run with the last error so the service can retry later.
 
-When upgrading an existing installation, `swarmfolio systemd install --force` installs the updated retry policy and keeps the hourly timer enabled. The standalone `run --apply` command still performs one pass; the installed service supplies automatic retries.
+When upgrading an existing installation, `swarmfolio systemd install --force` installs the updated guard and retry policy and keeps both services enabled. The standalone `run --apply` command still performs one pass; the installed services supply automatic retries and continuous protection.
 
 The service runs `swarmfolio` by name, searching `~/.local/bin` and standard system binary directories. For another installation directory, extend `ExecSearchPath` in a drop-in with `systemctl --user edit swarmfolio.service`.
 
@@ -196,7 +197,7 @@ When an addition needs several removals, the least valuable selected incumbents 
 
 Offers with no scheduled end use the full promotion multiplier throughout the planning horizon. Their JSON `free_until` is `null`; timed offers retain an expiry timestamp.
 
-The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Minimum freeleech time is an eligibility guard, not proof a download will finish before expiry. Real improvement needs comparison with actual credited upload over time.
+The JSON report exposes `upload_score_bytes` for additions and removals, `planning_horizon` as a duration string, `replacement_margin`, and `net_gain_score_bytes`. These are **heuristic scores, not measured or guaranteed future upload**. The model assumes full-file leecher demand shared with seeders, reduces older demand, and spreads upload uniformly across the horizon when valuing a bonus. It cannot observe leecher completion, predict download time or future arrivals, or model bandwidth contention from one snapshot. Timed-offer admission uses a reduced observed download capacity and a two-hour buffer; it rejects unknown capacity, but cannot guarantee completion. Real improvement needs comparison with actual credited upload over time.
 
 The read-only `plan` command requests download tokens and reads selected candidates' metainfo to verify their infohashes, without mutating qBittorrent. `run --apply` also resolves interrupted additions, reuses verified metainfo within the run, uploads additions stopped, waits for initialization, and rechecks category ownership and size before performing the replacement.
 

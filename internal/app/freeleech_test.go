@@ -136,7 +136,7 @@ func TestExecuteRechecksIndefiniteFreeleech(t *testing.T) {
 				}
 				changeAt := 2
 				if stage == "after replacement" {
-					changeAt = 3
+					changeAt = 4
 				}
 				searches := 0
 				runner.MTeam = &changingSearchMTeam{fakeMTeam: mt, change: func() {
@@ -219,7 +219,12 @@ func TestExecuteDoesNotAddUnverifiableOrExpiredInitialOffer(t *testing.T) {
 		expires  time.Time
 	}{
 		{name: "nonfree", discount: "PERCENT_50", expires: appNow.Add(3 * time.Hour)},
+		{name: "upload-only promotion", discount: "_2X", expires: appNow.Add(3 * time.Hour)},
+		{name: "normal", discount: "NORMAL", expires: appNow.Add(3 * time.Hour)},
 		{name: "unknown", discount: "UNKNOWN", expires: appNow.Add(3 * time.Hour)},
+		{name: "missing promotion", discount: "", expires: appNow.Add(3 * time.Hour)},
+		{name: "lowercase free", discount: "free", expires: appNow.Add(3 * time.Hour)},
+		{name: "free with whitespace", discount: "FREE ", expires: appNow.Add(3 * time.Hour)},
 		{name: "expired", discount: "FREE", expires: appNow},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -309,7 +314,7 @@ func TestExecuteDoesNotStartAfterFinalPromotionRefreshFails(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
 	runner := testRunner(qbt, mt)
-	runner.MTeam = &searchFailureMTeam{fakeMTeam: mt, failAt: 3}
+	runner.MTeam = &searchFailureMTeam{fakeMTeam: mt, failAt: 4}
 	_, err := runner.Execute(context.Background(), true)
 	if err == nil || !strings.Contains(err.Error(), "promotion refresh failed") {
 		t.Fatalf("final promotion refresh error = %v", err)
@@ -383,22 +388,32 @@ func TestExecuteRechecksExpiryAfterQBTValidation(t *testing.T) {
 			switch stage {
 			case "start":
 				qbt.torrents = nil
+				addCompletionEvidence(qbt)
 			case "resume":
 				qbt = pendingQBT(qbt.addHash)
+				addCompletionEvidence(qbt)
 			}
 			runner := testRunner(qbt, mt)
 			runner.Config.Policy.MinimumFreeleechRemaining = 0
 			now := appNow
 			runner.Now = func() time.Time { return now }
+			expireAfterSearch := 3
+			if stage == "resume" || stage == "start" {
+				expireAfterSearch = 2
+			}
 			searches := 0
 			runner.MTeam = &changingSearchMTeam{fakeMTeam: mt, change: func() { searches++ }}
 			runner.QBittorrent = &expiryDuringValidationQBT{fakeQBT: qbt, advanceTime: func() {
-				if searches >= 2 {
+				if searches >= expireAfterSearch {
 					now = mt.results[0].DiscountEndTime
 				}
 			}}
-			_, err := runner.Execute(context.Background(), true)
-			if err == nil || !strings.Contains(err.Error(), "required freeleech time") {
+			report, err := runner.Execute(context.Background(), true)
+			if stage == "start" {
+				if err != nil || report.Replans != 1 || len(report.Actions) != 0 {
+					t.Fatalf("expiry during pre-start validation was not safely replanned: error=%v report=%#v", err, report)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "required freeleech time") {
 				t.Fatalf("expiry during qBittorrent validation error = %v", err)
 			}
 			if prefixIndex(qbt.events, "start:") >= 0 || prefixIndex(qbt.events, "delete:old") >= 0 {

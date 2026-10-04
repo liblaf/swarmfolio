@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -109,6 +110,94 @@ func TestPlanWithMinimalInitializedConfig(t *testing.T) {
 	}
 }
 
+func TestGuardOncePausesAnActiveManagedNonFreeTorrent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	configuration := `[mteam]
+api-key = "mteam-secret"
+base_url = "https://mteam.test"
+
+[qbittorrent]
+base_url = "http://qbt.test"
+`
+	if err := os.WriteFile(path, []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+	stopped, tagged := false, false
+	http.DefaultTransport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		body := ""
+		switch request.URL.Host {
+		case "qbt.test":
+			switch request.URL.Path {
+			case "/api/v2/torrents/info":
+				state := "downloading"
+				if stopped {
+					state = "stoppedDL"
+				}
+				body = fmt.Sprintf(`[{"hash":"guarded","name":"guarded","size":100,"downloaded":40,"amount_left":60,"progress":0.4,"dlspeed":20,"time_active":2,"added_on":1,"last_activity":1,"save_path":"/downloads/swarmfolio/guarded","content_path":"/downloads/swarmfolio/guarded/content","state":%q,"category":"swarmfolio","auto_tmm":true}]`, state)
+			case "/api/v2/torrents/properties":
+				if request.URL.Query().Get("hash") != "guarded" {
+					t.Fatalf("properties query = %q", request.URL.RawQuery)
+				}
+				body = `{"comment":"42"}`
+			case "/api/v2/torrents/stop":
+				form, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(form) != "hashes=guarded" {
+					t.Fatalf("stop form = %q", form)
+				}
+				stopped = true
+				body = "Ok."
+			case "/api/v2/torrents/addTags":
+				form, err := io.ReadAll(request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				values, err := url.ParseQuery(string(form))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if values.Get("hashes") != "guarded" || values.Get("tags") != "swarmfolio-freeleech-paused" {
+					t.Fatalf("tag form = %q", form)
+				}
+				tagged = true
+				body = "Ok."
+			default:
+				t.Fatalf("unexpected qBittorrent request: %s %s", request.Method, request.URL)
+			}
+		case "mteam.test":
+			if request.Header.Get("x-api-key") != "mteam-secret" {
+				t.Fatal("M-Team API key was not sent")
+			}
+			switch request.URL.Path {
+			case "/api/member/profile":
+				body = `{"code":0,"data":{"id":7}}`
+			case "/api/member/getUserTorrentList":
+				body = `{"code":0,"data":{"pageNumber":1,"pageSize":200,"total":1,"totalPages":1,"data":[{"torrent":{"id":42,"name":"guarded","size":100,"createdDate":"2026-10-04 00:00:00","status":{"discount":"PERCENT_50","discountEndTime":"2026-10-05 00:00:00","seeders":1,"leechers":1}}}]}}`
+			default:
+				t.Fatalf("unexpected M-Team request: %s %s", request.Method, request.URL)
+			}
+		default:
+			t.Fatalf("unexpected request: %s", request.URL)
+		}
+		return httpTestResponse(request, http.StatusOK, body), nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"--config", path, "guard", "--once"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !stopped || !tagged {
+		t.Fatalf("guard mutations: stopped=%t tagged=%t", stopped, tagged)
+	}
+}
+
 func TestApplyReportsAcknowledgedMutationsAfterPostDeleteFailure(t *testing.T) {
 	const metainfoBytes = "d4:infod6:lengthi30e4:name3:newee"
 	newHash, err := metainfo.InfoHash([]byte(metainfoBytes))
@@ -153,7 +242,7 @@ minimum_residency = "1h"
 					t.Fatal(err)
 				}
 				if strings.Contains(string(data), `"discount":"FREE"`) {
-					body = fmt.Sprintf(`{"code":0,"data":{"data":[{"id":2,"name":"new","size":30,"createdDate":%q,"status":{"discount":"FREE","discountEndTime":"2099-01-01 00:00:00","seeders":1,"leechers":8}}]}}`, createdDate)
+					body = fmt.Sprintf(`{"code":0,"data":{"data":[{"id":2,"name":"new","size":30,"createdDate":%q,"status":{"discount":"FREE","discountEndTime":null,"seeders":1,"leechers":8}}]}}`, createdDate)
 				} else {
 					body = `{"code":0,"data":{"data":[]}}`
 				}
@@ -510,6 +599,31 @@ func TestSystemdPrint(t *testing.T) {
 	}
 }
 
+func TestSystemdPrintGuardRunsTheContinuousGuard(t *testing.T) {
+	requireLinux(t)
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"systemd", "print", "guard"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	directives := systemdDirectives(stdout.String())
+	if directives["ExecStart"] != "swarmfolio guard" || directives["ExecStopPost"] != "swarmfolio guard --halt" || directives["Restart"] != "always" {
+		t.Fatalf("guard unit directives = %#v", directives)
+	}
+}
+
+func TestGuardRejectsOnceAndHaltTogether(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"guard", "--once", "--halt"})
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "[once halt]") {
+		t.Fatalf("guard flags error = %v", err)
+	}
+}
+
 func TestSystemdPrintServiceHasNoEnvironmentFile(t *testing.T) {
 	requireLinux(t)
 	t.Parallel()
@@ -553,6 +667,9 @@ func TestSystemdServiceRetriesFailedRunsWithoutRateLimitLockout(t *testing.T) {
 	if directives["StartLimitIntervalSec"] != "0" {
 		t.Fatalf("StartLimitIntervalSec = %q; systemd can permanently stop retries after a start burst", directives["StartLimitIntervalSec"])
 	}
+	if directives["Requires"] != "swarmfolio-guard.service" || !slices.Contains(strings.Fields(directives["After"]), "swarmfolio-guard.service") {
+		t.Fatalf("optimizer guard dependency = %#v", directives)
+	}
 }
 
 func systemdDirectives(unit string) map[string]string {
@@ -577,7 +694,7 @@ func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"swarmfolio.service", "swarmfolio.timer"} {
+	for _, name := range systemdUnitNames {
 		path := filepath.Join(dir, "systemd", "user", name)
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -589,6 +706,7 @@ func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {
 	}
 	if got, want := readSystemctlLog(t, log), []string{
 		"--user daemon-reload",
+		"--user enable --now swarmfolio-guard.service",
 		"--user enable --now swarmfolio.timer",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("systemctl calls = %q, want %q", got, want)
@@ -602,8 +720,10 @@ func TestSystemdInstallUsesXDGConfigHome(t *testing.T) {
 	}
 	if got, want := readSystemctlLog(t, log), []string{
 		"--user daemon-reload",
+		"--user enable --now swarmfolio-guard.service",
 		"--user enable --now swarmfolio.timer",
 		"--user daemon-reload",
+		"--user enable --now swarmfolio-guard.service",
 		"--user enable --now swarmfolio.timer",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("repeated systemctl calls = %q, want %q", got, want)
@@ -630,7 +750,7 @@ func TestSystemdInstallRejectsCustomizedUnitsUnlessForced(t *testing.T) {
 	if err := command.Execute(); err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("customized install error = %v", err)
 	}
-	if got := readSystemctlLog(t, log); len(got) != 2 {
+	if got := readSystemctlLog(t, log); len(got) != 3 {
 		t.Fatalf("customized install ran systemctl: %q", got)
 	}
 	command = New(&stdout, &stderr)
@@ -657,7 +777,7 @@ func TestSystemdInstallPropagatesSystemctlFailuresAndCanRetry(t *testing.T) {
 	command := New(&stdout, &stderr)
 	command.SetArgs([]string{"systemd", "install"})
 	err := command.Execute()
-	if err == nil || !strings.Contains(err.Error(), "systemctl --user enable --now swarmfolio.timer") {
+	if err == nil || !strings.Contains(err.Error(), "systemctl --user enable --now swarmfolio-guard.service") {
 		t.Fatalf("enable failure = %v", err)
 	}
 	if !strings.Contains(stderr.String(), "stub enable failure") {
@@ -665,7 +785,7 @@ func TestSystemdInstallPropagatesSystemctlFailuresAndCanRetry(t *testing.T) {
 	}
 	if got, want := readSystemctlLog(t, log), []string{
 		"--user daemon-reload",
-		"--user enable --now swarmfolio.timer",
+		"--user enable --now swarmfolio-guard.service",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("failed systemctl calls = %q, want %q", got, want)
 	}
@@ -675,6 +795,38 @@ func TestSystemdInstallPropagatesSystemctlFailuresAndCanRetry(t *testing.T) {
 	command.SetArgs([]string{"systemd", "install"})
 	if err := command.Execute(); err != nil {
 		t.Fatalf("retry after enable failure: %v", err)
+	}
+}
+
+func TestSystemdUninstallStopsGuardAndRemovesUnits(t *testing.T) {
+	requireLinux(t)
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	log := installSystemctlStub(t)
+	var stdout, stderr bytes.Buffer
+	command := New(&stdout, &stderr)
+	command.SetArgs([]string{"systemd", "install"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	command = New(&stdout, &stderr)
+	command.SetArgs([]string{"systemd", "uninstall"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range systemdUnitNames {
+		if _, err := os.Stat(filepath.Join(dir, "systemd", "user", name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unit %s remains after uninstall: %v", name, err)
+		}
+	}
+	if got, want := readSystemctlLog(t, log), []string{
+		"--user daemon-reload",
+		"--user enable --now swarmfolio-guard.service",
+		"--user enable --now swarmfolio.timer",
+		"--user disable --now swarmfolio.timer swarmfolio-guard.service",
+		"--user daemon-reload",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("systemctl calls = %q, want %q", got, want)
 	}
 }
 

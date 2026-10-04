@@ -12,6 +12,7 @@ import (
 func TestExecuteRecordsAcknowledgedMutations(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err != nil || report.Error != "" {
 		t.Fatalf("error=%v report=%#v", err, report)
@@ -76,6 +77,7 @@ func TestExecuteRecordsUnconfirmedMutationsWithoutRetry(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
 			qbt, mt := testServices(t)
+			indefiniteFreeleech(mt)
 			runner := testRunner(qbt, mt)
 			runner.QBittorrent = &lostMutationResponseQBT{fakeQBT: qbt, operation: operation}
 			report, err := runner.Execute(context.Background(), true)
@@ -112,6 +114,7 @@ func TestExecuteRetainsMutationReceiptWhenRecoveryConfirmationFails(t *testing.T
 		t.Run(recovery, func(t *testing.T) {
 			t.Parallel()
 			qbt, mt := testServices(t)
+			indefiniteFreeleech(mt)
 			qbt = pendingQBT(qbt.addHash)
 			if recovery == "remove" {
 				mt.results = nil

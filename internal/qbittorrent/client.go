@@ -20,6 +20,10 @@ import (
 
 const maxResponseBytes int64 = 16 << 20
 
+// GuardPausedTag marks a torrent the freeleech guard stopped after its offer
+// ceased to be download-free.
+const GuardPausedTag = "swarmfolio-freeleech-paused"
+
 // Config configures a qBittorrent Web API client. BaseURL is the qBittorrent
 // web UI URL; an optional /api/v2 suffix is accepted.
 type Config struct {
@@ -42,11 +46,13 @@ type Torrent struct {
 	Hash         string
 	Name         string
 	Size         int64
+	Downloaded   int64
 	Uploaded     int64
 	AmountLeft   int64
 	Progress     float64
 	Ratio        float64
 	SeedingTime  time.Duration
+	DownloadTime time.Duration
 	AddedOn      time.Time
 	CompletionOn time.Time
 	LastActivity time.Time
@@ -57,6 +63,7 @@ type Torrent struct {
 	SavePath     string
 	ContentPath  string
 	Category     string
+	Tags         string
 	AutoTMM      bool
 }
 
@@ -295,6 +302,75 @@ func (c *Client) Start(ctx context.Context, hashes []string) error {
 	return c.formMutate(ctx, "torrents/start", url.Values{"hashes": {strings.Join(hashes, "|")}})
 }
 
+// Stop pauses torrents immediately. It is used when a tracked torrent is no
+// longer eligible for download.
+func (c *Client) Stop(ctx context.Context, hashes []string) error {
+	if err := validateHashes(hashes); err != nil {
+		return err
+	}
+	return c.formMutate(ctx, "torrents/stop", url.Values{"hashes": {strings.Join(hashes, "|")}})
+}
+
+// SetGuardPaused marks torrents stopped by the promotion guard. qBittorrent's
+// addTags endpoint is additive, so it cannot remove any user-managed tags.
+func (c *Client) SetGuardPaused(ctx context.Context, hashes []string) error {
+	if err := validateHashes(hashes); err != nil {
+		return err
+	}
+	return c.formMutate(ctx, "torrents/addTags", url.Values{
+		"hashes": {strings.Join(hashes, "|")},
+		"tags":   {GuardPausedTag},
+	})
+}
+
+// ClearGuardPaused removes only the marker managed by SetGuardPaused after a
+// guarded torrent has passed a fresh promotion and capacity check.
+func (c *Client) ClearGuardPaused(ctx context.Context, hashes []string) error {
+	if err := validateHashes(hashes); err != nil {
+		return err
+	}
+	return c.formMutate(ctx, "torrents/removeTags", url.Values{
+		"hashes": {strings.Join(hashes, "|")},
+		"tags":   {GuardPausedTag},
+	})
+}
+
+// MTeamID returns the M-Team torrent ID stored in the original torrent comment.
+// The comment must be an exact positive decimal ID so arbitrary user comments
+// cannot be mistaken for Swarmfolio provenance.
+func (c *Client) MTeamID(ctx context.Context, hash string) (int64, error) {
+	if err := validateHashes([]string{hash}); err != nil {
+		return 0, err
+	}
+	response, err := c.request(ctx, http.MethodGet, "torrents/properties", nil, "", url.Values{"hash": {hash}})
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if err := requireSuccess(response); err != nil {
+		return 0, err
+	}
+	var properties struct {
+		Comment *string `json:"comment"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&properties); err != nil {
+		return 0, fmt.Errorf("decode torrent properties response: %w", err)
+	}
+	if properties.Comment == nil || *properties.Comment == "" {
+		return 0, errors.New("qBittorrent torrent properties lack an M-Team comment")
+	}
+	for _, character := range *properties.Comment {
+		if character < '0' || character > '9' {
+			return 0, fmt.Errorf("qBittorrent torrent comment %q is not a positive decimal M-Team ID", *properties.Comment)
+		}
+	}
+	id, err := strconv.ParseInt(*properties.Comment, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("qBittorrent torrent comment %q is not a positive decimal M-Team ID", *properties.Comment)
+	}
+	return id, nil
+}
+
 func validateHashes(hashes []string) error {
 	if len(hashes) == 0 {
 		return errors.New("qBittorrent mutation requires at least one torrent hash")
@@ -392,11 +468,13 @@ type torrentResponse struct {
 	Hash         string  `json:"hash"`
 	Name         string  `json:"name"`
 	Size         int64   `json:"size"`
+	Downloaded   int64   `json:"downloaded"`
 	Uploaded     int64   `json:"uploaded"`
 	AmountLeft   int64   `json:"amount_left"`
 	Progress     float64 `json:"progress"`
 	Ratio        float64 `json:"ratio"`
 	SeedingTime  int64   `json:"seeding_time"`
+	TimeActive   int64   `json:"time_active"`
 	AddedOn      int64   `json:"added_on"`
 	CompletionOn int64   `json:"completion_on"`
 	LastActivity int64   `json:"last_activity"`
@@ -407,6 +485,7 @@ type torrentResponse struct {
 	SavePath     string  `json:"save_path"`
 	ContentPath  string  `json:"content_path"`
 	Category     string  `json:"category"`
+	Tags         string  `json:"tags"`
 	AutoTMM      bool    `json:"auto_tmm"`
 }
 
@@ -415,11 +494,13 @@ func (response torrentResponse) torrent() Torrent {
 		Hash:         response.Hash,
 		Name:         response.Name,
 		Size:         response.Size,
+		Downloaded:   response.Downloaded,
 		Uploaded:     response.Uploaded,
 		AmountLeft:   response.AmountLeft,
 		Progress:     response.Progress,
 		Ratio:        response.Ratio,
 		SeedingTime:  time.Duration(response.SeedingTime) * time.Second,
+		DownloadTime: time.Duration(response.TimeActive-response.SeedingTime) * time.Second,
 		AddedOn:      unixTime(response.AddedOn),
 		CompletionOn: unixTime(response.CompletionOn),
 		LastActivity: unixTime(response.LastActivity),
@@ -430,6 +511,7 @@ func (response torrentResponse) torrent() Torrent {
 		SavePath:     response.SavePath,
 		ContentPath:  response.ContentPath,
 		Category:     response.Category,
+		Tags:         response.Tags,
 		AutoTMM:      response.AutoTMM,
 	}
 }

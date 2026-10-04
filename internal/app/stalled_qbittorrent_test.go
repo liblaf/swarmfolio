@@ -28,7 +28,7 @@ func staleFreeSpace(qbt *fakeQBT, staleCalls int, stale int64) (func() (int64, e
 
 func TestRecoveryWaitsForReclaimedSpaceInsteadOfReplacingAgain(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT(qbt.addHash)
 	// A 40-byte estimate leaves a 15-byte limit for the 30-byte pending torrent.
 	// The stale window covers every snapshot before the recovery budget check
@@ -49,7 +49,7 @@ func TestRecoveryWaitsForReclaimedSpaceInsteadOfReplacingAgain(t *testing.T) {
 
 func TestRecoveryRemovesPendingTorrentThatStaysOverBudget(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT(qbt.addHash)
 	qbt.freeSpace = func() (int64, error) { return 40, nil }
 	runner := apiTestRunner(t, qbt, mt)
@@ -76,7 +76,7 @@ func (q *unreadableAfterQBT) Torrents(ctx context.Context) ([]qbittorrent.Torren
 
 func TestRecoveryDoesNotRemovePendingTorrentWhileQBittorrentIsUnreadable(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	base = pendingQBT(base.addHash)
 	base.freeSpace = func() (int64, error) { return 40, nil }
 	// Initial snapshot, pre-mutation verification, and the recovery snapshot.
@@ -95,7 +95,7 @@ func TestRecoveryDoesNotRemovePendingTorrentWhileQBittorrentIsUnreadable(t *test
 
 func TestDeletionTimeoutReportsLastObservedState(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt.freeSpace = func() (int64, error) { return 30, nil }
 
 	_, err := apiTestRunner(t, qbt, mt).Execute(context.Background(), true)
@@ -125,7 +125,7 @@ func TestTransientReadTimeoutsDoNotFailAddOrStartConfirmation(t *testing.T) {
 	for _, prefix := range []string{"add", "start:"} {
 		t.Run(prefix, func(t *testing.T) {
 			t.Parallel()
-			base, mt := testServices(t)
+			base, mt := nonTimedTestServices(t)
 			qbt := &timeoutAfterEventQBT{fakeQBT: base, prefix: prefix, remaining: 2}
 			report, err := deletionTestRunner(t, base, qbt, mt).Execute(context.Background(), true)
 			if err != nil || len(report.Actions) != 1 || !report.Actions[0].Applied || qbt.remaining != 0 {
@@ -140,7 +140,7 @@ func TestTransientReadTimeoutsDoNotFailAddOrStartConfirmation(t *testing.T) {
 
 func TestExecuteReplansAroundRefusedMetainfoDownload(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	_, otherHash := alternativeCandidate(t, mt)
 	qbt.addHash, qbt.addSize = otherHash, 20
 	refused := &candidateDownloadErrorMTeam{fakeMTeam: mt, errorsByID: map[int64]error{2: &mteam.DownloadRefusedError{Code: 1}}}
@@ -159,7 +159,7 @@ func TestExecuteReplansAroundRefusedMetainfoDownload(t *testing.T) {
 
 func TestRecoveryStopsWhenPendingOfferDownloadIsRefused(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT(qbt.addHash)
 	refused := &candidateDownloadErrorMTeam{fakeMTeam: mt, errorsByID: map[int64]error{2: &mteam.DownloadRefusedError{Code: 1}}}
 	runner := testRunner(qbt, mt)
@@ -174,7 +174,7 @@ func TestRecoveryStopsWhenPendingOfferDownloadIsRefused(t *testing.T) {
 
 func TestExecuteStopsAfterRepeatedRefusedMetainfoDownloads(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	refused := &candidateDownloadErrorMTeam{fakeMTeam: mt, errorsByID: make(map[int64]error)}
 	offer := mt.results[0]
 	mt.results = nil
@@ -206,7 +206,7 @@ func TestExecuteCapsAdditionsByIncompleteDownloads(t *testing.T) {
 	}{{0, 1, false}, {1, 0, false}, {2, 1, false}, {1, 0, true}, {2, 1, true}} {
 		t.Run(strconv.Itoa(test.limit)+"/"+strconv.FormatBool(test.apply), func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 				Hash: "busy", Name: "busy", Size: 1, AmountLeft: 1,
 				AddedOn: appNow.Add(-2 * time.Hour), LastActivity: appNow,

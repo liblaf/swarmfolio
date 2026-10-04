@@ -279,7 +279,7 @@ api_key = "mteam-secret"
 		settings.Policy.MinimumLeechers != 1 || settings.Policy.MinimumOpportunityRatio != 0.1 ||
 		settings.Policy.MinimumResidency.String() != "24h0m0s" || settings.Policy.MinimumIdle.String() != "6h0m0s" ||
 		settings.Policy.ActiveUploadRate != 64*1024 || settings.Policy.MaxAdditions != 2 || settings.Policy.MaxRemovals != 4 || settings.Policy.ReplacementMargin != 1.25 ||
-		settings.Policy.MaxIncompleteDownloads != 0 {
+		settings.Policy.MaxIncompleteDownloads != 0 || settings.Policy.DownloadCompletionSafetyFactor != 2 {
 		t.Fatalf("unexpected policy defaults: %#v", settings.Policy)
 	}
 }
@@ -290,6 +290,9 @@ func TestParseRejectsInvalidCreditedUploadPolicy(t *testing.T) {
 		"planning_horizon = \"0s\"",
 		"planning_horizon = \"-1h\"",
 		"replacement_margin = 0.99",
+		"download_completion_safety_factor = 0.99",
+		"download_completion_safety_factor = nan",
+		"download_completion_safety_factor = inf",
 	} {
 		policy := policy
 		t.Run(policy, func(t *testing.T) {
@@ -299,6 +302,17 @@ func TestParseRejectsInvalidCreditedUploadPolicy(t *testing.T) {
 				t.Fatalf("Parse() accepted invalid policy %q", policy)
 			}
 		})
+	}
+}
+
+func TestParseAcceptsDownloadCompletionSafetyFactor(t *testing.T) {
+	t.Parallel()
+	settings, err := Parse([]byte("[mteam]\napi-key = \"mteam-secret\"\n[policy]\ndownload_completion_safety_factor = 3.5\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Policy.DownloadCompletionSafetyFactor != 3.5 {
+		t.Fatalf("download completion safety factor = %v, want 3.5", settings.Policy.DownloadCompletionSafetyFactor)
 	}
 }
 

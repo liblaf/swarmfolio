@@ -87,6 +87,17 @@ func (r *candidateResolver) exclude(id, reason string, cause error) {
 // one candidate; no torrent mutations occur while finding the final plan.
 func (r Runner) buildPlan(ctx context.Context, now time.Time, candidates []optimizer.Candidate, state snapshot, resolved *candidateResolver) (optimizer.Plan, error) {
 	candidates = slices.Clone(candidates)
+	eligible := make([]optimizer.Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		fits, err := r.completionFits(now, candidate.FreeUntil, candidate.Size, state.all, "")
+		if err != nil {
+			return optimizer.Plan{}, err
+		}
+		if fits {
+			eligible = append(eligible, candidate)
+		}
+	}
+	candidates = eligible
 	for {
 		candidates = slices.DeleteFunc(candidates, func(candidate optimizer.Candidate) bool {
 			return resolved.excluded[candidate.ID] != nil
@@ -95,6 +106,33 @@ func (r Runner) buildPlan(ctx context.Context, now time.Time, candidates []optim
 		if err != nil {
 			return optimizer.Plan{}, err
 		}
+		var plannedBytes int64
+		for _, addition := range plan.Additions {
+			plannedBytes += addition.Candidate.Size
+		}
+		unsafe := false
+		for _, addition := range plan.Additions {
+			fits, err := r.completionFits(now, addition.Candidate.FreeUntil, plannedBytes, state.all, "")
+			if err != nil {
+				return optimizer.Plan{}, err
+			}
+			if !fits {
+				unsafe = true
+			}
+		}
+		if unsafe {
+			// Remove one least valuable addition and rebuild, so a shared deadline
+			// does not discard every offer when a smaller portfolio would fit.
+			worst := plan.Additions[0]
+			for _, addition := range plan.Additions[1:] {
+				if addition.UploadScore < worst.UploadScore || (addition.UploadScore == worst.UploadScore && addition.Candidate.ID > worst.Candidate.ID) {
+					worst = addition
+				}
+			}
+			candidates = slices.DeleteFunc(candidates, func(candidate optimizer.Candidate) bool { return candidate.ID == worst.Candidate.ID })
+			continue
+		}
+
 		seen := make(map[string]bool, len(state.all)+len(plan.Additions))
 		for _, torrent := range state.all {
 			seen[strings.ToLower(torrent.Hash)] = true

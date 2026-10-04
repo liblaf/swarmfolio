@@ -31,10 +31,11 @@ func (r Runner) applyPlan(ctx context.Context, candidates []optimizer.Candidate,
 		mutationsBefore := len(report.Mutations)
 		if err := r.applyAddition(ctx, addition, resolved); err != nil {
 			var exceeded *budgetExceededError
+			var deadline *deadlineExceededError
 			// Only replan a capacity rejection before this addition has made
 			// any mutation attempt. Interrupted or unconfirmed writes must use
 			// the existing recovery path, with their receipts intact.
-			if !errors.As(err, &exceeded) || len(report.Mutations) != mutationsBefore {
+			if (!errors.As(err, &exceeded) && !errors.As(err, &deadline)) || len(report.Mutations) != mutationsBefore {
 				return err
 			}
 			if report.Replans >= maxBudgetReplans {

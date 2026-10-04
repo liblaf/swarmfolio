@@ -65,7 +65,7 @@ func deletionTestRunner(t *testing.T, base *fakeQBT, qbt QBittorrent, mt *fakeMT
 
 func TestExecuteRetriesTransientDeletionReadTimeout(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	qbt := &timeoutAfterDeleteQBT{fakeQBT: base, remainingTimeouts: 1}
 	runner := deletionTestRunner(t, base, qbt, mt)
 
@@ -80,7 +80,7 @@ func TestExecuteRetriesTransientDeletionReadTimeout(t *testing.T) {
 
 func TestExecuteStopsAfterPersistentDeletionReadTimeout(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	qbt := &timeoutAfterDeleteQBT{fakeQBT: base, persistent: true}
 	runner := deletionTestRunner(t, base, qbt, mt)
 	runner.PollTimeout = 10 * time.Millisecond
@@ -96,7 +96,7 @@ func TestExecuteStopsAfterPersistentDeletionReadTimeout(t *testing.T) {
 
 func TestWaitForRegistrationsRemovedRetriesTransientReadTimeout(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	base.torrents = []qbittorrent.Torrent{{Hash: "stale"}}
 	qbt := &timeoutAfterDeleteQBT{fakeQBT: base, deleted: true, remainingTimeouts: 1, removeAfterTimeout: true}
 	runner := deletionTestRunner(t, base, qbt, mt)
@@ -111,7 +111,7 @@ func TestWaitForRegistrationsRemovedRetriesTransientReadTimeout(t *testing.T) {
 
 func TestExecuteFailsImmediatelyForNonTimeoutDeletionReadError(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	qbt := &nonTimeoutAfterDeleteQBT{fakeQBT: base, err: errors.New("qBittorrent authentication failed")}
 	runner := deletionTestRunner(t, base, qbt, mt)
 
@@ -126,7 +126,7 @@ func TestExecuteFailsImmediatelyForNonTimeoutDeletionReadError(t *testing.T) {
 
 func TestWaitForRemovalsStopsWhenParentContextIsCanceled(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	qbt := &timeoutAfterDeleteQBT{fakeQBT: base, persistent: true, deleted: true}
 	runner := deletionTestRunner(t, base, qbt, mt)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -143,7 +143,7 @@ func TestWaitForRemovalsStopsWhenParentContextIsCanceled(t *testing.T) {
 
 func TestExecuteStopsWhenTimeoutCancelsParentDuringDeletionVerification(t *testing.T) {
 	t.Parallel()
-	base, mt := testServices(t)
+	base, mt := nonTimedTestServices(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	qbt := &cancelOnTimeoutAfterDeleteQBT{fakeQBT: base, cancel: cancel}

@@ -61,18 +61,19 @@ type fileQBittorrent struct {
 }
 
 type filePolicy struct {
-	CandidateMaxAge           *string  `toml:"candidate_max_age"`
-	PlanningHorizon           *string  `toml:"planning_horizon"`
-	MinimumFreeleechRemaining *string  `toml:"minimum_freeleech_remaining"`
-	MinimumLeechers           *int     `toml:"minimum_leechers"`
-	MinimumOpportunityRatio   *float64 `toml:"minimum_opportunity_ratio"`
-	MinimumResidency          *string  `toml:"minimum_residency"`
-	MinimumIdle               *string  `toml:"minimum_idle"`
-	ActiveUploadRate          *string  `toml:"active_upload_rate"`
-	MaxAdditions              *int     `toml:"max_additions"`
-	MaxRemovals               *int     `toml:"max_removals"`
-	MaxIncompleteDownloads    *int     `toml:"max_incomplete_downloads"`
-	ReplacementMargin         *float64 `toml:"replacement_margin"`
+	CandidateMaxAge                *string  `toml:"candidate_max_age"`
+	PlanningHorizon                *string  `toml:"planning_horizon"`
+	MinimumFreeleechRemaining      *string  `toml:"minimum_freeleech_remaining"`
+	MinimumLeechers                *int     `toml:"minimum_leechers"`
+	MinimumOpportunityRatio        *float64 `toml:"minimum_opportunity_ratio"`
+	MinimumResidency               *string  `toml:"minimum_residency"`
+	MinimumIdle                    *string  `toml:"minimum_idle"`
+	ActiveUploadRate               *string  `toml:"active_upload_rate"`
+	MaxAdditions                   *int     `toml:"max_additions"`
+	MaxRemovals                    *int     `toml:"max_removals"`
+	MaxIncompleteDownloads         *int     `toml:"max_incomplete_downloads"`
+	ReplacementMargin              *float64 `toml:"replacement_margin"`
+	DownloadCompletionSafetyFactor *float64 `toml:"download_completion_safety_factor"`
 }
 
 type fileHTTP struct {
@@ -124,6 +125,9 @@ type Policy struct {
 	// MaxIncompleteDownloads caps unfinished managed torrents; zero means no cap.
 	MaxIncompleteDownloads int
 	ReplacementMargin      float64
+	// DownloadCompletionSafetyFactor reduces observed download capacity when
+	// deciding whether a timed freeleech offer can complete before it expires.
+	DownloadCompletionSafetyFactor float64
 }
 
 func DefaultPath() (string, error) {
@@ -276,8 +280,9 @@ func Parse(data []byte) (Settings, error) {
 			MinimumOpportunityRatio: defaultFloat64(raw.Policy.MinimumOpportunityRatio, 0.1),
 			MinimumResidency:        residency, MinimumIdle: idle, ActiveUploadRate: uploadRate,
 			MaxAdditions: defaultInt(raw.Policy.MaxAdditions, 2), MaxRemovals: defaultInt(raw.Policy.MaxRemovals, 4),
-			MaxIncompleteDownloads: defaultInt(raw.Policy.MaxIncompleteDownloads, 0),
-			ReplacementMargin:      defaultFloat64(raw.Policy.ReplacementMargin, 1.25),
+			MaxIncompleteDownloads:         defaultInt(raw.Policy.MaxIncompleteDownloads, 0),
+			ReplacementMargin:              defaultFloat64(raw.Policy.ReplacementMargin, 1.25),
+			DownloadCompletionSafetyFactor: defaultFloat64(raw.Policy.DownloadCompletionSafetyFactor, 2),
 		},
 		HTTPTimeout: timeout,
 	}
@@ -322,6 +327,9 @@ func (settings Settings) validate() error {
 	}
 	if settings.Policy.ReplacementMargin < 1 || math.IsNaN(settings.Policy.ReplacementMargin) || math.IsInf(settings.Policy.ReplacementMargin, 0) {
 		return errors.New("policy.replacement_margin must be finite and at least 1")
+	}
+	if settings.Policy.DownloadCompletionSafetyFactor < 1 || math.IsNaN(settings.Policy.DownloadCompletionSafetyFactor) || math.IsInf(settings.Policy.DownloadCompletionSafetyFactor, 0) {
+		return errors.New("policy.download_completion_safety_factor must be finite and at least 1")
 	}
 	return nil
 }

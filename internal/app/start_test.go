@@ -40,7 +40,7 @@ func TestExecuteWaitsForAcknowledgedStartToTakeEffect(t *testing.T) {
 	for _, operation := range []string{"addition", "recovery"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			if operation == "recovery" {
 				qbt = pendingQBT(qbt.addHash)
 			}
@@ -69,7 +69,7 @@ func TestExecuteFailsWhenAcknowledgedStartNeverTakesEffect(t *testing.T) {
 	for _, operation := range []string{"addition", "recovery"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			if operation == "recovery" {
 				qbt = pendingQBT(qbt.addHash)
 			}
@@ -98,7 +98,7 @@ func TestExecuteRejectsChangedTorrentAfterStartAcknowledgement(t *testing.T) {
 	for _, change := range []string{"disappeared", "error", "category", "size"} {
 		t.Run(change, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			delayed := &delayedStartQBT{fakeQBT: qbt, transitionAt: 1, transition: func(q *fakeQBT, hashes []string) {
 				if change == "disappeared" {
 					q.torrents = nil

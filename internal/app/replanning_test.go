@@ -63,6 +63,7 @@ func addReplanOffer(mt *fakeMTeam, id, size, leechers int64) {
 func TestExecuteReplansSecondAdditionWithinRunCaps(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents = nil
 	addReplanOffer(mt, 3, 20, 8)
 	addReplanOffer(mt, 4, 10, 4)
@@ -93,6 +94,7 @@ func TestExecuteReplansSecondAdditionWithinRunCaps(t *testing.T) {
 func TestExecuteReplanningPreservesWholeRunRemovalCap(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents[0].Size = 60
 	other := qbt.torrents[0]
 	other.Hash, other.Size = "other-old", 10
@@ -121,6 +123,7 @@ func TestExecuteReplanningPreservesWholeRunRemovalCap(t *testing.T) {
 func TestExecuteReplansWhenBudgetChangesDuringMetainfoDownload(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents = nil
 	addReplanOffer(mt, 3, 20, 8)
 	externalUse := int64(0)
@@ -137,6 +140,7 @@ func TestExecuteReplansWhenBudgetChangesDuringMetainfoDownload(t *testing.T) {
 func TestExecuteDoesNotReplanAfterMutationAttempt(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents = nil
 	addReplanOffer(mt, 3, 10, 8)
 	externalUse := int64(0)
@@ -155,6 +159,7 @@ func TestExecuteDoesNotReplanAfterMutationAttempt(t *testing.T) {
 func TestExecuteBoundsRepeatedBudgetReplanning(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt.torrents = nil
 	for id, size := range []int64{50, 40, 20, 10} {
 		addReplanOffer(mt, int64(id+3), size, 8)

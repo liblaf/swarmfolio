@@ -57,6 +57,7 @@ func TestExecuteReusesRetainedStoppedPayloadForReplacement(t *testing.T) {
 func TestExecuteDoesNotReportPartialRecoveryBeforeStartTakesEffect(t *testing.T) {
 	t.Parallel()
 	qbt, mt := testServices(t)
+	indefiniteFreeleech(mt)
 	qbt = pendingQBT(qbt.addHash)
 	qbt.torrents[0].Progress = .5
 	qbt.torrents[0].AmountLeft = 15

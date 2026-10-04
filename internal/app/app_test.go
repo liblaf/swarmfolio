@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -378,7 +379,7 @@ func TestExecuteUsesAPIFreeSpaceWithOneTiBReserve(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt.torrents = nil
 			if test.outstanding > 0 {
 				qbt.torrents = []qbittorrent.Torrent{{
@@ -433,7 +434,7 @@ func TestExecuteRecoversSafePendingTorrent(t *testing.T) {
 	}
 	mt := &fakeMTeam{results: []mteam.Torrent{{
 		ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2,
-		PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour),
+		PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: time.Time{},
 	}}, metainfo: metainfoBytes}
 	report, err := testRunner(qbt, mt).Execute(context.Background(), true)
 	if err != nil {
@@ -505,8 +506,8 @@ func TestExecuteRecoversAmbiguousPendingTorrentByExactHash(t *testing.T) {
 	qbt := pendingQBT(pendingHash)
 	mt := &fakeMTeam{
 		results: []mteam.Torrent{
-			{ID: 8, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour)},
-			{ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: appNow.Add(3 * time.Hour)},
+			{ID: 8, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: time.Time{}},
+			{ID: 9, Name: "pending", Size: 30, Seeders: 1, Leechers: 2, PublishedAt: appNow.Add(-time.Hour), Discount: "FREE", DiscountEndTime: time.Time{}},
 		},
 		metainfoByID: map[int64][]byte{
 			8: []byte("d4:infod6:lengthi30e4:name5:wrongee"),
@@ -576,7 +577,7 @@ func testRunner(qbt *fakeQBT, mt *fakeMTeam) Runner {
 				MinimumLeechers: 1, MinimumOpportunityRatio: 0.5,
 				MinimumResidency: time.Hour, MinimumIdle: time.Hour,
 				ActiveUploadRate: 1, MaxAdditions: 1, MaxRemovals: 1,
-				PlanningHorizon: 24 * time.Hour, ReplacementMargin: 1.25,
+				PlanningHorizon: 24 * time.Hour, ReplacementMargin: 1.25, DownloadCompletionSafetyFactor: 2,
 			},
 		},
 		QBittorrent: qbt, MTeam: mt, Now: func() time.Time { return appNow },
@@ -597,7 +598,7 @@ func testServices(t *testing.T) (*fakeQBT, *fakeMTeam) {
 	qbt := &fakeQBT{
 		defaultPath: "/downloads", categoryPath: "/downloads/swarmfolio", addHash: hash, addSize: 30,
 		torrents: []qbittorrent.Torrent{{
-			Hash: "old", Name: "old", Size: 70, Uploaded: 1, Progress: 1,
+			Hash: "old", Name: "old", Size: 70, Uploaded: 1, Progress: 1, Downloaded: 70, DownloadTime: time.Second, CompletionOn: appNow.Add(-time.Minute),
 			AddedOn: appNow.Add(-2 * time.Hour), LastActivity: appNow.Add(-2 * time.Hour),
 			SavePath: "/downloads/swarmfolio/old", ContentPath: "/downloads/swarmfolio/old", State: "stoppedUP",
 			Category: "swarmfolio", AutoTMM: true,
@@ -614,6 +615,9 @@ func testServices(t *testing.T) (*fakeQBT, *fakeMTeam) {
 }
 
 type fakeQBT struct {
+	ids          map[string]int64
+	stopErr      error
+	tagErr       error
 	defaultPath  string
 	categoryPath string
 	torrents     []qbittorrent.Torrent
@@ -714,4 +718,47 @@ func prefixIndex(values []string, prefix string) int {
 		}
 	}
 	return -1
+}
+
+func (q *fakeQBT) Stop(_ context.Context, hashes []string) error {
+	q.events = append(q.events, "stop:"+strings.Join(hashes, "|"))
+	q.mutations++
+	if q.stopErr != nil {
+		return q.stopErr
+	}
+	for i := range q.torrents {
+		if slices.Contains(hashes, q.torrents[i].Hash) {
+			q.torrents[i].State = "stoppedDL"
+			q.torrents[i].DLRate = 0
+		}
+	}
+	return nil
+}
+func (q *fakeQBT) SetGuardPaused(_ context.Context, hashes []string) error {
+	if q.tagErr != nil {
+		return q.tagErr
+	}
+	for i := range q.torrents {
+		if slices.Contains(hashes, q.torrents[i].Hash) {
+			q.torrents[i].Tags = qbittorrent.GuardPausedTag
+		}
+	}
+	return nil
+}
+func (q *fakeQBT) ClearGuardPaused(_ context.Context, hashes []string) error {
+	for i := range q.torrents {
+		if slices.Contains(hashes, q.torrents[i].Hash) {
+			q.torrents[i].Tags = ""
+		}
+	}
+	return nil
+}
+func (q *fakeQBT) MTeamID(_ context.Context, hash string) (int64, error) {
+	if id := q.ids[hash]; id > 0 {
+		return id, nil
+	}
+	return 0, fmt.Errorf("no M-Team ID for %s", hash)
+}
+func (m *fakeMTeam) Offers(context.Context) ([]mteam.Torrent, error) {
+	return slices.Clone(m.results), nil
 }

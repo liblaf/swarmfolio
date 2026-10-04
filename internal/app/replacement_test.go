@@ -18,12 +18,12 @@ func TestExecuteRevalidatesReplacementAfterPromotionRefresh(t *testing.T) {
 	for _, change := range []string{"removed", "category", "started", "size"} {
 		t.Run(change, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			runner := testRunner(qbt, mt)
 			searches := 0
 			runner.MTeam = &changingSearchMTeam{fakeMTeam: mt, change: func() {
 				searches++
-				if searches != 2 {
+				if searches != 3 {
 					return
 				}
 				switch change {
@@ -51,7 +51,7 @@ func TestExecuteRevalidatesReplacementAfterPromotionRefresh(t *testing.T) {
 
 func TestExecuteWaitsForReportedSpaceAfterDeletion(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	runner := apiTestRunner(t, qbt, mt)
 	probes := 0
 	qbt.freeSpace = func() (int64, error) {
@@ -77,7 +77,7 @@ func TestExecuteAppliesUsingQBitFreeSpace(t *testing.T) {
 	for _, state := range []string{"empty", "completed", "pending", "downloading"} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			wantMutations := 3
 			switch state {
 			case "empty":
@@ -107,7 +107,7 @@ func TestExecuteAppliesUsingQBitFreeSpace(t *testing.T) {
 
 func TestExecuteLeavesPendingWhenReportedSpaceDoesNotRecover(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	runner := apiTestRunner(t, qbt, mt)
 	qbt.freeSpace = func() (int64, error) { return 30, nil }
 	report, err := runner.Execute(context.Background(), true)
@@ -156,7 +156,7 @@ func (q *delayedDeleteQBT) Torrents(ctx context.Context) ([]qbittorrent.Torrent,
 
 func TestExecuteWaitsForDeletedTorrentToDisappear(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	delayed := &delayedDeleteQBT{fakeQBT: qbt}
 	runner := testRunner(qbt, mt)
 	runner.QBittorrent = delayed
@@ -168,7 +168,7 @@ func TestExecuteWaitsForDeletedTorrentToDisappear(t *testing.T) {
 
 func TestExecuteCancelsDiskSpaceWait(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	runner := apiTestRunner(t, qbt, mt)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -187,7 +187,7 @@ func TestExecuteCancelsDiskSpaceWait(t *testing.T) {
 
 func TestPreallocationReservesExistingOutstandingDownloads(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt.preallocate = true
 	qbt.torrents = append(qbt.torrents, qbittorrent.Torrent{
 		Hash: "other", Size: 50, AmountLeft: 50, Category: "user-managed", SavePath: "/downloads/user",
@@ -214,8 +214,8 @@ func TestExecuteRechecksReportedSpaceAfterFinalPromotionRefresh(t *testing.T) {
 	for _, operation := range []string{"addition", "recovery"} {
 		t.Run(operation, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
-			finalSearch := 3
+			qbt, mt := nonTimedTestServices(t)
+			finalSearch := 4
 			if operation == "recovery" {
 				qbt = pendingQBT(qbt.addHash)
 				finalSearch = 2

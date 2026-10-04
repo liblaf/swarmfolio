@@ -36,24 +36,31 @@ type QBittorrent interface {
 	Add(context.Context, qbittorrent.AddRequest) error
 	Delete(context.Context, []string, bool) error
 	Start(context.Context, []string) error
+	Stop(context.Context, []string) error
+	SetGuardPaused(context.Context, []string) error
+	ClearGuardPaused(context.Context, []string) error
+	MTeamID(context.Context, string) (int64, error)
 }
 
 type MTeam interface {
 	Search(context.Context) ([]mteam.Torrent, error)
 	Download(context.Context, int64) ([]byte, error)
+	Offers(context.Context) ([]mteam.Torrent, error)
 }
 
 type ProbeDisk func(string) (disk.Space, error)
 
 type Runner struct {
-	Config       config.Settings
-	QBittorrent  QBittorrent
-	MTeam        MTeam
-	ProbeDisk    ProbeDisk
-	Now          func() time.Time
-	PollInterval time.Duration
-	PollTimeout  time.Duration
-	mutations    *[]Mutation
+	Config             config.Settings
+	QBittorrent        QBittorrent
+	MTeam              MTeam
+	ProbeDisk          ProbeDisk
+	Now                func() time.Time
+	PollInterval       time.Duration
+	PollTimeout        time.Duration
+	mutations          *[]Mutation
+	downloadCapacity   int64
+	capacityObservedAt time.Time
 }
 
 type Report struct {
@@ -160,6 +167,11 @@ func (r Runner) Execute(ctx context.Context, apply bool) (report Report, runErr 
 	if err != nil {
 		return report, err
 	}
+	r.downloadCapacity, err = completionCapacity(r.Now(), state.all, r.Config.Policy.DownloadCompletionSafetyFactor)
+	if err != nil {
+		return report, err
+	}
+	r.capacityObservedAt = r.Now()
 	report.DownloadPath = state.targetPath
 	report.Budget = state.budget
 	report.TorrentCount = len(state.all)
@@ -351,7 +363,7 @@ func (r Runner) optimizerConfig(limit int64) optimizer.Config {
 func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates []optimizer.Candidate, apply bool, resolved *candidateResolver) ([]Recovery, bool, error) {
 	var pending []qbittorrent.Torrent
 	for _, torrent := range state.all {
-		if r.isRecoverablePending(torrent, state.targetPath) {
+		if r.isRecoverablePending(torrent, state.targetPath) && (apply || !guardPaused(torrent)) {
 			pending = append(pending, torrent)
 		}
 	}
@@ -376,7 +388,9 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 			validCandidates = append(validCandidates, *candidate)
 			continue
 		}
-		stale = append(stale, torrent)
+		if !guardPaused(torrent) {
+			stale = append(stale, torrent)
+		}
 	}
 	if _, err := r.verifyRecoverablePending(ctx, pending, state.targetPath); err != nil {
 		return recoveries, false, err
@@ -428,11 +442,17 @@ func (r Runner) recoverPending(ctx context.Context, state snapshot, candidates [
 		if !r.hasFreeleechTime(freeUntil) {
 			return recoveries, len(stale) > 0, errors.New("pending torrents no longer have the required freeleech time")
 		}
+		if err := r.requireCompletion(ctx, freeUntil, pendingBytes(valid), ""); err != nil {
+			return recoveries, len(stale) > 0, err
+		}
 		if err := r.start(ctx, hashes); err != nil {
 			return recoveries, len(stale) > 0, fmt.Errorf("resume pending torrents: %w", err)
 		}
 		if err := r.waitForStarted(ctx, valid, state.targetPath); err != nil {
 			return recoveries, true, fmt.Errorf("confirm pending torrents resumed: %w", err)
+		}
+		if err := r.QBittorrent.ClearGuardPaused(ctx, hashes); err != nil {
+			return recoveries, true, fmt.Errorf("clear resumed freeleech pause tags: %w", err)
 		}
 		for _, torrent := range valid {
 			recoveries = append(recoveries, Recovery{Action: "resume", Hash: torrent.Hash, Name: torrent.Name})
@@ -551,10 +571,30 @@ func torrentHashes(torrents []qbittorrent.Torrent) []string {
 }
 
 func (r Runner) pendingCandidate(ctx context.Context, torrent qbittorrent.Torrent, candidates []optimizer.Candidate, resolved *candidateResolver) (*optimizer.Candidate, error) {
+	var guardedID int64
+	if guardPaused(torrent) {
+		var err error
+		guardedID, err = r.QBittorrent.MTeamID(ctx, torrent.Hash)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, candidate := range candidates {
+		if guardedID > 0 && candidate.ID != strconv.FormatInt(guardedID, 10) {
+			continue
+		}
 		if candidate.Size != torrent.Size ||
 			!r.hasFreeleechTime(candidate.FreeUntil) {
 			continue
+		}
+		if guardPaused(torrent) {
+			if err := r.requireCompletion(ctx, candidate.FreeUntil, torrent.AmountLeft, torrent.Hash); err != nil {
+				var deadline *deadlineExceededError
+				if errors.As(err, &deadline) {
+					continue
+				}
+				return nil, err
+			}
 		}
 		info, err := resolved.resolve(ctx, candidate.ID, candidate.Size)
 		if err != nil {
@@ -701,6 +741,13 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if err := r.verifyRemovals(addition.Removals, beforeAdd.all, beforeAdd.targetPath); err != nil {
 		return err
 	}
+	freeUntil, err := r.verifyFreeleech(ctx, []optimizer.Candidate{candidate})
+	if err != nil {
+		return err
+	}
+	if err := r.requireCompletion(ctx, freeUntil, candidate.Size, ""); err != nil {
+		return err
+	}
 	err = r.QBittorrent.Add(ctx, qbittorrent.AddRequest{
 		Metainfo: info.bytes, MetainfoName: candidate.ID + ".torrent",
 		SavePath: beforeAdd.targetPath, Category: r.Config.QBittorrent.Category,
@@ -720,7 +767,6 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if added.Size != candidate.Size || !r.isAddedPayload(*added, beforeAdd.targetPath) {
 		return rollback(fmt.Errorf("added M-Team torrent %s does not match its stopped, automatically managed category plan: state=%q size=%d (expected %d) amount_left=%d progress=%g category=%q auto_tmm=%t save_path=%q", candidate.ID, added.State, added.Size, candidate.Size, added.AmountLeft, added.Progress, added.Category, added.AutoTMM, added.SavePath))
 	}
-	var freeUntil time.Time
 	if len(addition.Removals) > 0 {
 		freeUntil, err = r.verifyFreeleech(ctx, []optimizer.Candidate{candidate})
 		if err != nil {
@@ -747,6 +793,9 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	if len(addition.Removals) > 0 {
 		if !r.hasFreeleechTime(freeUntil) {
 			return rollback(fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID))
+		}
+		if err := r.requireCompletion(ctx, freeUntil, added.AmountLeft, hash); err != nil {
+			return rollback(err)
 		}
 		hashes := make([]string, len(addition.Removals))
 		for index, removal := range addition.Removals {
@@ -778,6 +827,9 @@ func (r Runner) applyAddition(ctx context.Context, addition optimizer.Addition, 
 	}
 	if !r.hasFreeleechTime(freeUntil) {
 		return fmt.Errorf("candidate %s no longer has the required freeleech time", candidate.ID)
+	}
+	if err := r.requireCompletion(ctx, freeUntil, added.AmountLeft, hash); err != nil {
+		return err
 	}
 	if err := r.start(ctx, hashes); err != nil {
 		return fmt.Errorf("start candidate %s: %w", candidate.ID, err)

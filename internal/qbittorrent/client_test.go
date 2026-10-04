@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestAPIKeyTorrents(t *testing.T) {
 		}
 		switch request.URL.Path {
 		case "/api/v2/torrents/info":
-			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","content_path":"/data/Example","category":"freeleech","auto_tmm":true}]`)
+			_, _ = io.WriteString(writer, `[{"hash":"abc","name":"Example","size":42,"downloaded":77,"uploaded":123,"amount_left":456,"progress":0.5,"ratio":1.2,"seeding_time":61,"time_active":70,"added_on":100,"completion_on":200,"last_activity":300,"eta":400,"state":"uploading","dlspeed":2,"upspeed":3,"save_path":"/data","content_path":"/data/Example","category":"freeleech","tags":"one, two","auto_tmm":true}]`)
 		default:
 			t.Errorf("unexpected request %s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -51,6 +52,12 @@ func TestAPIKeyTorrents(t *testing.T) {
 	}
 	if torrent.Uploaded != 123 || torrent.AmountLeft != 456 {
 		t.Errorf("transfer amounts = uploaded %d, left %d", torrent.Uploaded, torrent.AmountLeft)
+	}
+	if torrent.Downloaded != 77 || torrent.DownloadTime != 9*time.Second {
+		t.Errorf("download accounting = %d, %s", torrent.Downloaded, torrent.DownloadTime)
+	}
+	if torrent.Tags != "one, two" {
+		t.Errorf("tags = %q", torrent.Tags)
 	}
 	if !torrent.AutoTMM {
 		t.Error("AutoTMM = false, want true")
@@ -351,6 +358,76 @@ func TestMutationsRejectBroadOrEmptyTargets(t *testing.T) {
 		if err := client.Start(context.Background(), hashes); err == nil {
 			t.Fatalf("Start(%v) succeeded", hashes)
 		}
+	}
+}
+
+func TestStopAndSetGuardPaused(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		switch r.URL.Path {
+		case "/api/v2/torrents/stop":
+			if got := r.Form.Get("hashes"); got != "one|two" {
+				t.Errorf("stop hashes = %q", got)
+			}
+		case "/api/v2/torrents/addTags", "/api/v2/torrents/removeTags":
+			if got := r.Form.Get("hashes"); got != "one|two" {
+				t.Errorf("tag hashes = %q", got)
+			}
+			if got := r.Form.Get("tags"); got != GuardPausedTag {
+				t.Errorf("tags = %q", got)
+			}
+		default:
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, "Ok.")
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	if err := client.Stop(context.Background(), []string{"one", "two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetGuardPaused(context.Background(), []string{"one", "two"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ClearGuardPaused(context.Background(), []string{"one", "two"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMTeamIDReadsOnlyPositiveDecimalComment(t *testing.T) {
+	t.Parallel()
+	for name, comment := range map[string]string{
+		"valid":  "123456",
+		"empty":  "",
+		"zero":   "0",
+		"spaces": " 123",
+		"text":   "mteam:123",
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/v2/torrents/properties" || r.URL.Query().Get("hash") != "hash" {
+					t.Fatalf("request = %s", r.URL)
+				}
+				_, _ = io.WriteString(w, `{"comment":`+strconv.Quote(comment)+`}`)
+			}))
+			defer server.Close()
+			id, err := newTestClient(t, server.URL).MTeamID(context.Background(), "hash")
+			if name == "valid" {
+				if err != nil || id != 123456 {
+					t.Fatalf("MTeamID = %d, %v", id, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("MTeamID(%q) = %d, want error", comment, id)
+			}
+		})
 	}
 }
 

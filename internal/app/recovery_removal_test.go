@@ -40,7 +40,7 @@ func (q *delayedRegistrationDeleteQBT) Torrents(ctx context.Context) ([]qbittorr
 
 func TestExecuteWaitsForStalePendingRegistrationBeforeReplanning(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	candidateHash := qbt.addHash
 	qbt = pendingQBT("stale")
 	qbt.addHash, qbt.addSize = candidateHash, 30
@@ -58,7 +58,7 @@ func TestExecuteWaitsForStalePendingRegistrationBeforeReplanning(t *testing.T) {
 
 func TestExecuteDoesNotReportUnconfirmedStaleRemoval(t *testing.T) {
 	t.Parallel()
-	qbt, mt := testServices(t)
+	qbt, mt := nonTimedTestServices(t)
 	qbt = pendingQBT("stale")
 	delayed := &delayedRegistrationDeleteQBT{fakeQBT: qbt}
 	runner := apiTestRunner(t, qbt, mt)

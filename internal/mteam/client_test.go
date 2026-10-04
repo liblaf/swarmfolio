@@ -139,6 +139,87 @@ func TestSearchDeduplicatesPagesAndRejectsConflicts(t *testing.T) {
 	}
 }
 
+func TestOffersListsIncompleteTorrentsIncludingNonFreeDiscounts(t *testing.T) {
+	t.Parallel()
+	profileRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/member/profile":
+			profileRequests++
+			if r.Method != http.MethodPost || r.Header.Get("x-api-key") != "key" {
+				t.Fatalf("profile request = %s headers=%v", r.Method, r.Header)
+			}
+			io.WriteString(w, `{"code":0,"data":{"id":"42"}}`)
+		case "/api/member/getUserTorrentList":
+			var request userTorrentRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.UserID != 42 || request.Type != "INCOMPLETE" || request.PageSize != 200 {
+				t.Fatalf("list request = %#v", request)
+			}
+			if request.PageNumber == 1 {
+				io.WriteString(w, `{"code":0,"data":{"pageNumber":"1","pageSize":"200","total":"2","totalPages":"2","data":[{"torrent":{"id":1,"name":"free","size":1,"createdDate":"2099-01-01 00:00:00","status":{"discount":"FREE","discountEndTime":null,"seeders":1,"leechers":1}}}]}}`)
+				return
+			}
+			if request.PageNumber == 2 {
+				io.WriteString(w, `{"code":0,"data":{"pageNumber":"2","pageSize":"200","total":"2","totalPages":"2","data":[{"torrent":null},{"torrent":{"id":"2","name":"half","size":"2","createdDate":"2099-01-01 00:00:00","status":{"discount":"PERCENT_50","discountEndTime":"2099-01-02 00:00:00","seeders":"1","leechers":"1"}}}]}}`)
+				return
+			}
+			t.Fatalf("unexpected page %d", request.PageNumber)
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := testClient(t, server.URL, Config{Timezone: "UTC"})
+	offers, err := client.Offers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) != 2 || offers[1].ID != 2 || offers[1].Discount != "PERCENT_50" {
+		t.Fatalf("offers = %#v", offers)
+	}
+	if _, err := client.Offers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if profileRequests != 1 {
+		t.Fatalf("profile requests = %d, want 1", profileRequests)
+	}
+}
+
+func TestOffersRejectsMissingPromotionExpiry(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/member/profile" {
+			io.WriteString(w, `{"code":0,"data":{"id":42}}`)
+			return
+		}
+		io.WriteString(w, `{"code":0,"data":{"pageNumber":1,"pageSize":200,"total":1,"totalPages":1,"data":[{"torrent":{"id":1,"name":"bad","size":1,"createdDate":"2099-01-01 00:00:00","status":{"discount":"PERCENT_50","seeders":1,"leechers":1}}}]}}`)
+	}))
+	defer server.Close()
+	if _, err := testClient(t, server.URL, Config{}).Offers(context.Background()); err == nil || !strings.Contains(err.Error(), "discount end time") {
+		t.Fatalf("Offers error = %v", err)
+	}
+}
+
+func TestOffersAcceptsAnEmptyIncompletePage(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/member/profile" {
+			io.WriteString(w, `{"code":0,"data":{"id":42}}`)
+			return
+		}
+		io.WriteString(w, `{"code":0,"data":{"pageNumber":"1","pageSize":"200","total":"0","totalPages":"0","data":[]}}`)
+	}))
+	defer server.Close()
+	offers, err := testClient(t, server.URL, Config{}).Offers(context.Background())
+	if err != nil || len(offers) != 0 {
+		t.Fatalf("Offers = %#v, %v", offers, err)
+	}
+}
+
 type torrentFixture struct {
 	name, publishedAt, discount, discountEndTime string
 	size, seeders, leechers                      int64

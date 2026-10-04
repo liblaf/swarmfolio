@@ -11,7 +11,7 @@ func TestExecuteResumesStoppedPartialPendingDownload(t *testing.T) {
 	for _, state := range []string{"stoppedDL", "pausedDL"} {
 		t.Run(state, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt = pendingQBT(qbt.addHash)
 			qbt.torrents[0].Progress = .5
 			qbt.torrents[0].AmountLeft = 15
@@ -33,7 +33,7 @@ func TestExecuteRemovesStoppedPartialPendingWithoutDeletingFiles(t *testing.T) {
 	for _, reason := range []string{"stale", "over budget"} {
 		t.Run(reason, func(t *testing.T) {
 			t.Parallel()
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt = pendingQBT(qbt.addHash)
 			qbt.torrents[0].Progress = .5
 			qbt.torrents[0].AmountLeft = 15
@@ -70,7 +70,7 @@ func TestExecuteDoesNotRecoverCompletedOrUnmanagedStoppedTorrent(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			qbt, mt := testServices(t)
+			qbt, mt := nonTimedTestServices(t)
 			qbt = pendingQBT(qbt.addHash)
 			test.mutate(qbt)
 			report, err := testRunner(qbt, mt).Execute(context.Background(), true)
