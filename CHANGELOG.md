@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.6](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.6) - 2026-10-09
+
+### 🐛 Bug Fixes
+
+- **(deps)** update module golang.org/x/sys to v0.49.0 (#27) - [e26498e](https://github.com/liblaf/swarmfolio/commit/e26498eb216a38256dc30df66d6b1d7fe021d600) by [@renovate[bot]](https://github.com/apps/renovate)
+
+### ❤️ Contributors
+
+- [@renovate[bot]](https://github.com/apps/renovate)
+
 ## [v0.4.5](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.5) - 2026-10-04
 
 ### 🐛 Bug Fixes
@@ -15,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@liblaf](https://github.com/liblaf)
 - [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier)
 
