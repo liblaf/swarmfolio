@@ -7,7 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.6](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.6) - 2026-10-09
+## [v0.4.7](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.7) - 2026-10-13
+
+### ⚙️ Continuous Integrations
+
+- **(deps)** update goreleaser/goreleaser-action digest to a4f02ab (#31) - [8e81f6b](https://github.com/liblaf/swarmfolio/commit/8e81f6b5e4ee8366ed2dd3b9e42dd5ab62a4bdd5) by [@renovate[bot]](https://github.com/apps/renovate)
+
+### ❤️ Contributors
+
+- [@renovate[bot]](https://github.com/apps/renovate)
+- [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier)
+
+## [v0.4.6](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.6) - 2026-10-11
 
 ### 🐛 Bug Fixes
 
@@ -15,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@renovate[bot]](https://github.com/apps/renovate)
 
 ## [v0.4.5](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.5) - 2026-10-04
