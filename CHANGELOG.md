@@ -7,7 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Conventional Changelog](https://github.com/conventional-changelog/conventional-changelog-config-spec/blob/master/versions/2.2.0/README.md),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [v0.4.7](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.7) - 2026-10-13
+## [v0.4.8](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.8) - 2026-11-10
+
+### 🐛 Bug Fixes
+
+- **(deps)** update module golang.org/x/sys to v0.50.0 (#35) - [74b370c](https://github.com/liblaf/swarmfolio/commit/74b370ce876748e43b42a95ff2f1d08009cd92b8) by [@renovate[bot]](https://github.com/apps/renovate)
+
+### ❤️ Contributors
+
+- [@renovate[bot]](https://github.com/apps/renovate)
+- [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier)
+
+## [v0.4.7](https://github.com/liblaf/swarmfolio/releases/tag/v0.4.7) - 2026-10-18
 
 ### ⚙️ Continuous Integrations
 
@@ -15,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### ❤️ Contributors
 
+- [@liblaf-release-please[bot]](https://github.com/apps/liblaf-release-please)
 - [@renovate[bot]](https://github.com/apps/renovate)
 - [@liblaf-copier[bot]](https://github.com/apps/liblaf-copier)
 
