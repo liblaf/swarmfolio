@@ -249,15 +249,13 @@ func TestSearchRejectsAPIErrorAndMalformedFreeTorrent(t *testing.T) {
 
 func TestDownloadUsesTokenAndValidatesTorrent(t *testing.T) {
 	t.Parallel()
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/torrent/genDlToken":
 			if r.Method != http.MethodPost || r.URL.Query().Get("id") != "42" {
 				t.Fatalf("token request = %s %s", r.Method, r.URL)
 			}
-			// The production API issues HTTPS URLs. Rewrite the transport in this
-			// test so the local test endpoint can stand in for that server.
+
 			io.WriteString(w, `{"code":"0","data":"https://mteam.test/torrent"}`)
 		case "/torrent":
 			io.WriteString(w, "d4:infod6:lengthi1e4:name1:xee")
